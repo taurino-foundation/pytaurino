@@ -1,0 +1,68 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: taurino
+DocumentNamespace: https://spdx.org/spdxdocs/taurino-4fca92e6-45c1-4e23-8ab2-9eec9e2f802a
+
+Creator: Person: Ari Bermeki
+Created: 2026-10-11T18:56:00Z
+
+DocumentComment: <text>
+This SPDX document describes the Taurino Python package.
+
+Package metadata is based on the project's pyproject.toml.
+Unverified metadata is recorded as NOASSERTION.
+</text>
+
+##### Package: taurino
+
+PackageName: taurino
+SPDXID: SPDXRef-Package-taurino
+PackageSupplier: NOASSERTION
+PackageOriginator: NOASSERTION
+PackageDownloadLocation: NOASSERTION
+FilesAnalyzed: false
+PackageHomePage: https://github.com/taurino-foundation/taurino
+PackageLicenseConcluded: NOASSERTION
+PackageLicenseDeclared: MIT OR Apache-2.0
+PackageCopyrightText: NOASSERTION
+PrimaryPackagePurpose: LIBRARY
+
+PackageSummary: <text>
+Taurino is an asynchronous, cross-platform web-based GUI
+framework for Python, powered by Rust, Tokio, Tao, Wry,
+and PyO3.
+</text>
+
+PackageDescription: <text>
+Taurino is a Python GUI framework providing native desktop
+windows, embedded webviews, asynchronous execution, and
+inter-process communication through a Rust-based runtime.
+
+The framework integrates Tao for native window management,
+Wry for embedded webviews, Tokio for asynchronous execution,
+and PyO3 for Python and Rust interoperability.
+
+The Python package uses Maturin as its build backend and
+exposes the native extension module taurino._taurino.
+
+Its declared Python runtime dependencies include Pydantic,
+Taunicorn, and MessagePack.
+
+Taurino is distributed under the MIT OR Apache-2.0
+dual-license expression.
+</text>
+
+PackageComment: <text>
+This document describes the package at metadata level.
+
+The package version is dynamically determined during the
+build process and is not asserted in this document.
+
+Dependency versions, source revision, file checksums,
+and release artifact integrity have not been verified.
+
+This record is not a complete release-specific SBOM.
+</text>
+
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-taurino

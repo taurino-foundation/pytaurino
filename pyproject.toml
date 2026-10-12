@@ -1,0 +1,87 @@
+
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[build-system]
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
+
+[project]
+name = "taurino"
+dynamic = ["version"]
+
+description = "An asynchronous, cross-platform desktop GUI framework for Python, powered by Rust, Tao, and Wry."
+readme = { file = "README.md", content-type = "text/markdown" }
+
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = [
+    "LICENSE-MIT",
+    "LICENSE-APACHE-2.0",
+]
+
+keywords = [
+    "asyncio",
+    "desktop",
+    "gui",
+    "ipc",
+    "pyo3",
+    "rust",
+    "tao",
+    "tokio",
+    "webview",
+    "wry",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+
+    "Intended Audience :: Developers",
+
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+
+    "Topic :: Desktop Environment",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Software Development :: User Interfaces",
+
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "msgpack",
+    "pydantic>=2,<3",
+    "taunicorn",
+]
+
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.1.1,<10",
+    "pytest-asyncio>=1.4.0,<2",
+]
+
+
+[project.urls]
+Homepage = "https://github.com/taurino-foundation/taurino"
+Repository = "https://github.com/taurino-foundation/taurino"
+Issues = "https://github.com/taurino-foundation/taurino/issues"
+
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "taurino.core._taurino"
+strip = true

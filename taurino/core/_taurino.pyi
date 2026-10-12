@@ -1,0 +1,3 @@
+from typing import Any, Callable, Protocol
+
+def runtime(config: bytes, shutdown_event: Any, status: Callable[[], None]) -> None: ...

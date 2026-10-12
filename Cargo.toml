@@ -1,0 +1,139 @@
+[package]
+name = "taurino"
+authors = ["Ari Bermeki"]
+homepage = "https://taurino.app/"
+repository = "https://github.com/taurino-apps/taurino"
+categories = ["gui", "web-programming"]
+license = "Apache-2.0 OR MIT"
+edition = "2024"
+rust-version = "1.90"
+version = "0.1.0"
+[lib]
+name = "_taurino"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = {version = "=0.29", default-features = false, features = ["abi3-py310","anyhow","bytes","extension-module","generate-import-lib","macros"]}
+anyhow = "1.0.91"
+tokio-util = {version = "0.7.17",default-features = false}
+taunicorn = "0.1.1"
+tokio = {version = "1",features = ["macros","rt-multi-thread","time","fs", "sync"]}
+async-trait = "0.1.92"
+wry = { version = "0.57.0", default-features = false, features = [
+  "os-webview",
+  "linux-body",
+] }
+raw-window-handle = "0.6"
+tao = { version = "0.37.0", default-features = false, features = ["rwh_06", "serde"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
+url = { version = "2", features = ["serde"]  }
+dpi = { version = "0.1", features = ["serde"] }
+cargo_metadata = { version = "0.23"}
+uuid = { version = "1", features = ["v4", "serde"] }
+http = "1"
+regex = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "0.8.22", features = ["url", "uuid1"]}
+serde_with = "3"
+rmp-serde = "1"
+rmpv = { version = "1", features = ["with-serde"] }
+serde_bytes = "0.11.19"
+serialize-to-javascript = { version = "0.1.2"}
+serde-untagged = "0.1"
+getrandom = { version = "0.4", features = ["std"] }
+memchr = "2"
+ctor = { version = "1.0", default-features = false }
+infer = "0.22"
+dunce = "1"
+log = "0.4.21"
+plist = "1"
+data-url = "0.3.2"
+mime = "0.3.17"
+mime_guess = "2.0.5"
+tempfile = "3.27.0"
+reqwest = "0.13.5"
+percent-encoding = "2"
+parking_lot = "0.12.5"
+
+
+
+# ─────────────────────────────────────────────
+# Windows
+# ─────────────────────────────────────────────
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation","Win32_UI","Win32_UI_WindowsAndMessaging","Win32_Graphics_Gdi","Win32_Graphics_Dwm","Win32_System_LibraryLoader","Win32_System_WinRT"] }
+softbuffer = { version = "0.4.8", default-features = false }
+once_cell = "1.21.4"
+webview2-com = "0.39.1"
+
+
+# ─────────────────────────────────────────────
+# macOS
+# ─────────────────────────────────────────────
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = {version = "0.3.2",default-features = false,features = ["std","block2","NSApplication","NSResponder","NSView","NSWindow","NSScreen","NSGraphics","NSColor","NSImage"]}
+objc2-web-kit = {version = "0.3.2",default-features = false,features = ["objc2-app-kit","WKWebView","WKWebViewConfiguration","WKUserContentController"]}
+
+# ─────────────────────────────────────────────
+# Linux / BSD
+# ─────────────────────────────────────────────
+
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+gtk = {version = "0.18",features = ["v3_24"]}
+webkit2gtk = {version = "=2.0",features = ["v2_40"]}
+
+
+
+[features]
+default = ["x11","dbus"]
+x11 = ["tao/x11","wry/x11"]
+dbus = ["tao/dbus"]
+common-controls-v6 = ["windows/Win32_UI_Controls","windows/Win32_UI_Shell"]
+
+# Desktop only
+[target.'cfg(any(target_os = "linux",target_os = "dragonfly",target_os = "freebsd",target_os = "openbsd",target_os = "netbsd",target_os = "windows",target_os = "macos"))'.dependencies]
+muda = {version = "0.20",default-features = false,features = ["serde","gtk3"]}
+tray-icon = {version = "0.25",default-features = false,features = ["serde","libappindicator"]}
+
+
+
+# Standard-Release-Profil: klein & optimiert
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+incremental = false
+opt-level = "s"
+strip = true
+
+# Dev-Profil-Anpassung für schnellere Build-Tools
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+# Aggressiveres Profil für maximale Größenreduktion
+[profile.release-size-optimized]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+lto = "fat"
+incremental = false
+panic = "abort"
+strip = "symbols"
+
+# [workspace.lints.rust]
+# unsafe_code = "warn"
+# missing_docs = "warn"
+
+[workspace.lints.clippy]
+# TODO: Update in next PR to keep changes small, see https://github.com/tauri-apps/tauri/pull/16029
+collapsible_if = "allow"
+
+redundant_clone = "warn"
+assigning_clones = "warn"
+or_fun_call = "warn"
