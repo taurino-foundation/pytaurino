@@ -16,15 +16,15 @@ T = TypeVar("T")
 
 
 class AppHandle:
-    def __init__(self, app: "App") -> None:
+    def __init__(self, app: App) -> None:
         self._app = app
 
     @property
-    def config(self) -> "Config":
-        return self._app.config
+    def config(self) -> Config:
+        return self._app.config.build()
 
     @property
-    def state(self) -> "State":
+    def state(self) -> State:
         return self._app.state
 
     @property
@@ -58,6 +58,11 @@ class AppHandle:
 
     async def stop(self) -> None:
         await self._app.stop()
+
+    async def emit(
+        self, event: str, payload: Any = None, *, webview_label: str = "webview-main"
+    ) -> None:
+        await self._app.emit(event=event, payload=payload, webview_label=webview_label)
 
     # The registry and multiplexer are deliberately *not* public properties.
     # Internal framework methods can reach app._registry and app._primary_session.

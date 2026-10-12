@@ -6,13 +6,13 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
-from uuid import uuid4
+from typing import Any, Literal
 
-from taurino._internal.command import CommandRegistry
+from pydantic import ValidationError
+
+from taurino._internal.command import CommandRegistry, InvokeRequest
 from taurino._internal.connection import IpcPeer, IpcServer
 from taurino._internal.multiplexer import (
-    ApiRequest,
     ApiResponse,
     Multiplexer,
     pack,
@@ -20,13 +20,13 @@ from taurino._internal.multiplexer import (
 )
 from taurino._internal.runtime import Runtime
 from taurino.app_handle import AppHandle
-from taurino.config import Config, ConfigBuilder, IpcConnectionConfig
+from taurino.config import Config, ConfigBuilder
 from taurino.error import AppLifecycleError, ProtocolError
 from taurino.state import State
 
 log = logging.getLogger(__name__)
 
-COMMAND_METHOD = "taurino.command"
+COMMAND_METHOD = "commands.invoke"
 EVENT_METHOD = "taurino.event"
 
 
@@ -51,6 +51,7 @@ class App:
     Startup: user setup -> bind server -> accept task -> spawn Rust -> IPC connected.
     IpcServer never processes or routes a message; App does this here.
     """
+
     def __init__(
         self,
         *,
@@ -107,9 +108,7 @@ class App:
                 await _invoke_hook(self._setup_hook, self)
             self._server = IpcServer(self.config._connection)
             await self._server.start()  # MUST finish before the Rust child process starts.
-            self._accept_task = asyncio.create_task(
-                self._accept_forever(), name="taurino-accept"
-            )
+            self._accept_task = asyncio.create_task(self._accept_forever(), name="taurino-accept")
             self._runtime = Runtime(
                 self.config.to_engine_bytes(),
                 start_timeout=self.config._connection.connect_timeout + 10.0,
@@ -117,9 +116,7 @@ class App:
             )
             # multiprocessing spawn + readiness handshake must never block the asyncio server loop.
             await asyncio.to_thread(self._runtime.start)
-            await self.handle.wait_connected(
-                timeout=self.config._connection.connect_timeout
-            )
+            await self.handle.wait_connected(timeout=self.config._connection.connect_timeout)
             self._started = True
             self._ready_to_run.set()
         except BaseException:
@@ -156,6 +153,7 @@ class App:
 
     async def _serve_peer(self, peer: IpcPeer) -> None:
         assert self._server is not None
+
         session = _Session(
             peer,
             Multiplexer(
@@ -164,103 +162,227 @@ class App:
                 max_message_size=self.config._connection.max_message_size,
             ),
         )
+
         self._sessions.add(session)
+
         if self._primary_session is None:
             self._primary_session = session
             self._connected.set()
-        # Backpressure: tasks are created only after acquiring a bounded slot.
+
         capacity = asyncio.Semaphore(64)
         messages: set[asyncio.Task[None]] = set()
+
         try:
             while not self._stopped:
                 raw = await peer.receive()
-                value = unpack(raw, max_size=self.config._connection.max_message_size)
-                if isinstance(value, list) and len(value) == 4:
-                    session.multiplexer.resolve(ApiResponse.from_array(value))
-                    continue
-                request = ApiRequest.from_array(value)
-                await capacity.acquire()
-                task = asyncio.create_task(
-                    self._dispatch_request(session, request, capacity),
-                    name=f"taurino-req-{request.request_id}",
+
+                value = unpack(
+                    raw,
+                    max_size=self.config._connection.max_message_size,
                 )
+
+                if not isinstance(value, (list, tuple)):
+                    log.warning("Invalid IPC envelope type")
+                    continue
+
+                # RPC response: Rust -> Python Multiplexer
+                if len(value) == 4:
+                    response = ApiResponse.from_array(value)
+                    session.multiplexer.resolve(response)
+                    continue
+
+                # RPC request: Rust -> Python App
+                if len(value) != 3:
+                    log.warning("Invalid IPC envelope length")
+                    continue
+
+                request_id, method, arguments = value
+
+                if type(request_id) is not int or not 0 <= request_id <= 0xFFFF:
+                    log.warning("Invalid RPC request ID")
+                    continue
+
+                if not isinstance(method, str):
+                    await self._send_rpc_response(session, request_id, 400, "Invalid RPC method")
+                    continue
+
+                if method != COMMAND_METHOD:
+                    await self._send_rpc_response(
+                        session,
+                        request_id,
+                        404,
+                        f"Unknown RPC method: {method}",
+                    )
+                    continue
+
+                if not isinstance(arguments, (list, tuple)) or len(arguments) != 1:
+                    await self._send_rpc_response(
+                        session,
+                        request_id,
+                        400,
+                        "commands.invoke expects exactly one argument",
+                    )
+                    continue
+
+                try:
+                    invoke = InvokeRequest.model_validate(arguments[0])
+                except ValidationError:
+                    log.warning(
+                        "Rejected malformed command request",
+                        exc_info=True,
+                    )
+                    await self._send_rpc_response(
+                        session,
+                        request_id,
+                        400,
+                        "Invalid command request",
+                    )
+                    continue
+
+                await capacity.acquire()
+
+                try:
+                    task = asyncio.create_task(
+                        self._dispatch_command(
+                            session,
+                            request_id,
+                            invoke,
+                            capacity,
+                        ),
+                        name=f"taurino-req-{invoke.cmd}",
+                    )
+                except BaseException:
+                    capacity.release()
+                    raise
+
                 messages.add(task)
                 task.add_done_callback(messages.discard)
+
         except asyncio.CancelledError:
             pass
+
         except (EOFError, ConnectionError, TimeoutError):
             log.info("IPC session disconnected")
+
         except (ProtocolError, ValueError):
-            log.warning("Rejected invalid IPC message", exc_info=True)
+            log.warning("Rejected invalid IPC protocol message", exc_info=True)
+
         except Exception:
             log.exception("IPC session failed")
+
         finally:
             for task in messages:
                 task.cancel()
+
             if messages:
-                await asyncio.gather(*messages, return_exceptions=True)
+                await asyncio.gather(
+                    *messages,
+                    return_exceptions=True,
+                )
+
             session.multiplexer.close()
+
             await self._server.disconnect(peer)
+
             self._sessions.discard(session)
+
             if self._primary_session is session:
-                self._primary_session = next(iter(self._sessions), None)
+                self._primary_session = next(
+                    iter(self._sessions),
+                    None,
+                )
+
                 if self._primary_session is None:
                     self._connected.clear()
 
-    async def _dispatch_request(
-        self, session: _Session, request: ApiRequest, capacity: asyncio.Semaphore
+    async def _send_rpc_response(
+        self,
+        session: _Session,
+        request_id: int,
+        status: int,
+        message: str,
+        data: Any = None,
+    ) -> None:
+        payload = pack(
+            [request_id, status, message, data],
+            max_size=self.config._connection.max_message_size,
+        )
+        await session.peer.send(payload)
+
+    async def _dispatch_command(
+        self,
+        session: _Session,
+        request_id: int,
+        request: InvokeRequest,
+        capacity: asyncio.Semaphore,
     ) -> None:
         try:
-            if request.method == COMMAND_METHOD:
-                args = request.args.value
-                if (
-                    len(args) != 4
-                    or not isinstance(args[0], str)
-                    or not isinstance(args[1], int)
-                    or not isinstance(args[2], int)
-                    or not isinstance(args[3], dict)
-                ):
-                    response = request.err(
-                        400,
-                        "Command arguments must be [name, result_id, error_id, data]",
-                    )
-                else:
-                    name, result_id, error_id, data = args
-                    result = await self._registry.dispatch(
-                        name, result_id=result_id, error_id=error_id, data=data
-                    )
-                    response = request.ok(result)
-            elif request.method == EVENT_METHOD:
-                if len(request.args.value) != 1:
-                    response = request.err(
-                        400, "Event arguments must contain exactly one event"
-                    )
-                else:
-                    if self._event_hook is not None:
-                        await _invoke_hook(
-                            self._event_hook, self.handle, request.args.single()
-                        )
-                    response = request.ok(None)
-            else:
-                response = request.err(404, "Unknown internal IPC method")
-            await session.peer.send(
-                pack(
-                    response.to_array(),
-                    max_size=self.config._connection.max_message_size,
-                )
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Request dispatch failed")
             try:
-                await session.peer.send(
-                    pack(request.err(500, "Internal dispatch error").to_array())
+                result = await self._registry.dispatch(request)
+
+                await self._send_rpc_response(
+                    session,
+                    request_id,
+                    0,
+                    "ok",
+                    result.model_dump(mode="json"),
                 )
+
+            except asyncio.CancelledError:
+                raise
+
             except Exception:
-                log.exception("Failed to send dispatch error")
+                log.exception(
+                    "Command dispatch failed: %s",
+                    request.cmd,
+                )
+
+                try:
+                    await self._send_rpc_response(
+                        session,
+                        request_id,
+                        500,
+                        "Internal command dispatch error",
+                    )
+                except Exception:
+                    log.exception("Failed to send RPC error response")
+
         finally:
             capacity.release()
+
+    async def emit(
+        self,
+        event: str,
+        payload: Any = None,
+        *,
+        webview_label: str = "webview-main",
+    ) -> None:
+        if not isinstance(event, str) or not event:
+            raise ValueError("Invalid event name")
+
+        if not isinstance(webview_label, str) or not webview_label:
+            raise ValueError("Invalid webview label")
+
+        session = self._primary_session
+
+        if session is None or session.peer.closed:
+            raise ConnectionError("No active IPC session")
+
+        message = [
+            "webview.emit",
+            {
+                "webview_label": webview_label,
+                "event": event,
+                "payload": payload,
+            },
+        ]
+
+        data = pack(
+            message,
+            max_size=self.config._connection.max_message_size,
+        )
+
+        await session.peer.send(data)
 
     async def stop(self) -> None:
         if self._stopped:
@@ -291,9 +413,66 @@ class App:
         self._registry.close()
         self._started = False
 
-    async def __aenter__(self) -> "App":
-        await self.start()
+    async def __aenter__(self) -> App:
+        await self.__start()
         return self
 
     async def __aexit__(self, *_: Any) -> None:
         await self.stop()
+
+
+""" async def _dispatch_request(
+    self, session: _Session, request: InvokeRequest, capacity: asyncio.Semaphore
+) -> None:
+    try:
+        if request.method == COMMAND_METHOD:
+            args = request.args.value
+            if (
+                len(args) != 4
+                or not isinstance(args[0], str)
+                or not isinstance(args[1], int)
+                or not isinstance(args[2], int)
+                or not isinstance(args[3], dict)
+            ):
+                response = request.err(
+                    400,
+                    "Command arguments must be [name, result_id, error_id, data]",
+                )
+            else:
+                name, result_id, error_id, data = args
+                result = await self._registry.dispatch(
+                    name, result_id=result_id, error_id=error_id, data=data
+                )
+                response = request.ok(result)
+        elif request.method == EVENT_METHOD:
+            if len(request.args.value) != 1:
+                response = request.err(
+                    400, "Event arguments must contain exactly one event"
+                )
+            else:
+                if self._event_hook is not None:
+                    await _invoke_hook(
+                        self._event_hook, self.handle, request.args.single()
+                    )
+                response = request.ok(None)
+        else:
+            response = request.err(404, "Unknown internal IPC method")
+        await session.peer.send(
+            pack(
+                response.to_array(),
+                max_size=self.config._connection.max_message_size,
+            )
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("Request dispatch failed")
+        try:
+            await session.peer.send(
+                pack(request.err(500, "Internal dispatch error").to_array())
+            )
+        except Exception:
+            log.exception("Failed to send dispatch error")
+    finally:
+        capacity.release()
+ """

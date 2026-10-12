@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+import os
+from typing import TYPE_CHECKING, Self
 
 from taurino.config import IpcConnectionConfig, IpcSecurity
 
@@ -12,9 +13,7 @@ if TYPE_CHECKING:
     from taunicorn.security import SecureConnection
 
 
-async def read_exact(
-    connection: "Connection", size: int, timeout: float | None
-) -> bytes:
+async def read_exact(connection: Connection, size: int, timeout: float | None) -> bytes:
     chunks = bytearray()
     async with asyncio.timeout(timeout):
         while len(chunks) < size:
@@ -28,9 +27,9 @@ async def read_exact(
 class IpcPeer:
     def __init__(
         self,
-        connection: "Connection",
+        connection: Connection,
         *,
-        secure: "SecureConnection | None",
+        secure: SecureConnection | None,
         config: IpcConnectionConfig,
     ):
         self.connection = connection
@@ -67,22 +66,55 @@ class IpcPeer:
     async def receive(self) -> bytes:
         if self._closed:
             raise ConnectionError("IPC peer closed")
+
         async with self._receive_lock:
             if self._closed:
                 raise ConnectionError("IPC peer closed")
+
             try:
-                async with asyncio.timeout(self.config.operation_timeout):
-                    if self.secure is not None:
-                        data = await self.secure.receive()
-                    else:
-                        header = await read_exact(self.connection, 4, None)
+                if self.secure is not None:
+                    # No application-level idle timeout.
+                    # SecureConnection manages its own framing.
+                    data = await self.secure.receive()
+
+                else:
+                    # Wait indefinitely for the first byte.
+                    # An idle connection is not an error.
+                    first_byte = await read_exact(
+                        self.connection,
+                        1,
+                        None,
+                    )
+
+                    # Once a frame starts, enforce the timeout.
+                    async with asyncio.timeout(self.config.operation_timeout):
+                        remaining_header = await read_exact(
+                            self.connection,
+                            3,
+                            None,
+                        )
+
+                        header = first_byte + remaining_header
                         length = int.from_bytes(header, "big")
+
                         if not 0 < length <= self.config.max_message_size:
                             raise ValueError("Invalid IPC frame")
-                        data = await read_exact(self.connection, length, None)
-                    if not 0 < len(data) <= self.config.max_message_size:
-                        raise ValueError("Invalid IPC message")
-                    return data
+
+                        data = await read_exact(
+                            self.connection,
+                            length,
+                            None,
+                        )
+
+                if not 0 < len(data) <= self.config.max_message_size:
+                    raise ValueError("Invalid IPC message")
+
+                return data
+
+            except asyncio.CancelledError:
+                # Cancellation is controlled by application lifecycle.
+                raise
+
             except BaseException:
                 await self.close()
                 raise
@@ -102,7 +134,7 @@ class IpcServer:
 
     def __init__(self, config: IpcConnectionConfig):
         self.config = config
-        self._server: "Server | None" = None
+        self._server: Server | None = None
         self._clients: set[IpcPeer] = set()
         self._pending = 0
         self._closed = False
@@ -125,12 +157,33 @@ class IpcServer:
 
         if self._closed or self._server is not None:
             raise RuntimeError("Server unavailable")
-        if self.config.permissions is not None:
+
+        endpoint = self.config.endpoint
+        permissions = self.config.permissions
+
+        if permissions is None:
+            self._server = await Server.start(endpoint)
+            return
+
+        if os.name == "nt":
+            # Windows: SDDL security descriptor
+            if not isinstance(permissions, str):
+                raise TypeError("Windows IPC permissions must be an SDDL string")
+
             self._server = await Server.bind(
-                self.config.endpoint, mode=self.config.permissions
+                endpoint,
+                mode=permissions,
             )
+
         else:
-            self._server = await Server.start(self.config.endpoint)
+            # Unix: POSIX file permissions
+            if type(permissions) is not int:
+                raise TypeError("Unix IPC permissions must be an integer")
+
+            self._server = await Server.bind(
+                endpoint,
+                mode=permissions,  # pyright: ignore[reportArgumentType]
+            )
 
     async def accept(self) -> IpcPeer:
         server = self._server
@@ -193,13 +246,11 @@ class IpcServer:
             self._clients.clear()
         if server is not None:
             await server.stop()
-        await asyncio.gather(
-            *(peer.close() for peer in clients), return_exceptions=True
-        )
+        await asyncio.gather(*(peer.close() for peer in clients), return_exceptions=True)
 
-    async def __aenter__(self) -> "IpcServer":
+    async def __aenter__(self) -> Self:
         await self.start()
         return self
 
-    async def __aexit__(self, *_: Any) -> None:
+    async def __aexit__(self, *_: object) -> None:
         await self.stop()

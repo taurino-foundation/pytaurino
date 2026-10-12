@@ -7,8 +7,6 @@ from typing import Any, overload
 
 from taurino.app import App
 
-from .config import Config
-
 Hook = Callable[..., Any]
 
 
@@ -42,9 +40,7 @@ class Builder:
     def setup(self, hook: Hook | None = None) -> Hook | Callable[[Hook], Hook]:
         def register(fn: Hook) -> Hook:
             if self._built or self._setup_hook is not None or not callable(fn):
-                raise RuntimeError(
-                    "Setup hook already registered, invalid, or builder is built"
-                )
+                raise RuntimeError("Setup hook already registered, invalid, or builder is built")
             self._setup_hook = fn
             return fn
 
@@ -70,7 +66,7 @@ class Builder:
     # Alias to match the original pasted Builder.run event-hook decorator.
     run = on_event
 
-    def build(self) -> "App":
+    def build(self) -> App:
         """Build exactly one App; native bridge target is optional but must exist at runtime."""
         from .app import App
 

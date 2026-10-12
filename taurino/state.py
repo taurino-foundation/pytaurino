@@ -31,9 +31,7 @@ class State:
             try:
                 return cast(T, self._values[state_type])
             except KeyError:
-                raise StateNotFoundError(
-                    f"State not found: {state_type.__name__}"
-                ) from None
+                raise StateNotFoundError(f"State not found: {state_type.__name__}") from None
 
     def try_get(self, state_type: type[T]) -> T | None:
         with self._lock:
@@ -48,9 +46,7 @@ class State:
             try:
                 return cast(T, self._values.pop(state_type))
             except KeyError:
-                raise StateNotFoundError(
-                    f"State not found: {state_type.__name__}"
-                ) from None
+                raise StateNotFoundError(f"State not found: {state_type.__name__}") from None
 
     def get_or_create(self, state_type: type[T], factory: Callable[[], T]) -> T:
         with self._lock:

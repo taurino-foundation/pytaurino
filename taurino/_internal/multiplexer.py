@@ -8,9 +8,13 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, TypeVar, cast
 
 import msgpack
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
-from taurino.error import MultiplexerClosedError, ProtocolError, RequestIdsExhausted
+from taurino.error import (
+    MultiplexerClosedError,
+    ProtocolError,
+    RequestIdsExhausted,
+)
 
 T = TypeVar("T")
 MAX_MESSAGE_SIZE = 1024 * 1024
@@ -21,11 +25,21 @@ def pack(value: Any, *, max_size: int = MAX_MESSAGE_SIZE) -> bytes:
     def serialize(x: Any) -> Any:
         if is_dataclass(x) and not isinstance(x, type):
             return asdict(x)
+
         raise TypeError(f"Unsupported MessagePack value: {type(x).__name__}")
 
-    result = msgpack.packb(value, use_bin_type=True, default=serialize)
+    result = msgpack.packb(
+        value,
+        use_bin_type=True,
+        default=serialize,
+    )
+
+    if not isinstance(result, bytes):
+        raise ProtocolError("MessagePack serialization failed")
+
     if len(result) > max_size:
         raise ProtocolError("Message too large")
+
     return result
 
 
@@ -101,10 +115,10 @@ class ApiRequest:
     def args(self) -> ApiArguments:
         return self.arguments
 
-    def ok(self, data: Any = None) -> "ApiResponse":
+    def ok(self, data: Any = None) -> ApiResponse:
         return ApiResponse(self.request_id, 0, "ok", data)
 
-    def err(self, code: int, message: str) -> "ApiResponse":
+    def err(self, code: int, message: str) -> ApiResponse:
         return ApiResponse(self.request_id, code, message, None)
 
     def to_array(self) -> list[Any]:
@@ -114,17 +128,13 @@ class ApiRequest:
         return pack(self.to_array())
 
     @classmethod
-    def from_array(cls, value: Any) -> "ApiRequest":
-        if (
-            not isinstance(value, list)
-            or len(value) != 3
-            or not isinstance(value[2], list)
-        ):
+    def from_array(cls, value: Any) -> ApiRequest:
+        if not isinstance(value, list) or len(value) != 3 or not isinstance(value[2], list):
             raise ProtocolError("Invalid ApiRequest array")
         return cls(value[0], value[1], ApiArguments(value[2]))
 
     @classmethod
-    def from_msgpack(cls, data: bytes) -> "ApiRequest":
+    def from_msgpack(cls, data: bytes) -> ApiRequest:
         return cls.from_array(unpack(data))
 
 
@@ -148,13 +158,13 @@ class ApiResponse:
         return pack(self.to_array())
 
     @classmethod
-    def from_array(cls, value: Any) -> "ApiResponse":
+    def from_array(cls, value: Any) -> ApiResponse:
         if not isinstance(value, list) or len(value) != 4:
             raise ProtocolError("Invalid ApiResponse array")
         return cls(*value)
 
     @classmethod
-    def from_msgpack(cls, data: bytes) -> "ApiResponse":
+    def from_msgpack(cls, data: bytes) -> ApiResponse:
         return cls.from_array(unpack(data))
 
 
@@ -224,9 +234,7 @@ class Multiplexer:
         if self._closed:
             raise MultiplexerClosedError("Multiplexer closed")
         if self._next_id > MAX_REQUEST_ID:
-            raise RequestIdsExhausted(
-                "u16 IDs exhausted; reconnect to create a fresh session"
-            )
+            raise RequestIdsExhausted("u16 IDs exhausted; reconnect to create a fresh session")
         request_id = self._next_id
         self._next_id += 1
         return request_id
@@ -271,29 +279,37 @@ class Multiplexer:
         result_type: type[T],
         timeout: float | None = None,
     ) -> T:
-        response = await self.request(
-            method, *args, result_type=result_type, timeout=timeout
-        )
+        response = await self.request(method, *args, result_type=result_type, timeout=timeout)
         return cast(T, response.data)
 
     def resolve(self, response: ApiResponse) -> bool:
         self._get_loop()
+
         pending = self._pending.get(response.request_id)
+
         if pending is None or pending.future.done():
             return False
+
         if response.code != 0:
             pending.future.set_result(response)
             return True
+
         try:
             validated = pending.adapter.validate_python(response.data)
-        except Exception as exc:
+
+        except ValidationError as exc:
             pending.future.set_exception(exc)
+
         else:
             pending.future.set_result(
                 ApiResponse(
-                    response.request_id, response.code, response.message, validated
+                    response.request_id,
+                    response.code,
+                    response.message,
+                    validated,
                 )
             )
+
         return True
 
     def feed_data(self, data: bytes) -> bool:
@@ -314,6 +330,4 @@ class Multiplexer:
         self._closed = True
         for pending in self._pending.values():
             if not pending.future.done():
-                pending.future.set_exception(
-                    MultiplexerClosedError("Multiplexer closed")
-                )
+                pending.future.set_exception(MultiplexerClosedError("Multiplexer closed"))

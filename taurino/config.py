@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import msgpack
@@ -22,26 +22,24 @@ class FrozenConfig(BaseModel):
     )
 
 
-class WindowPosition(str, Enum):
+class WindowPosition(StrEnum):
     CENTER = "center"
     DEFAULT = "default"
 
 
-class MenuItemType(str, Enum):
+class MenuItemType(StrEnum):
     ITEM = "item"
     SEPARATOR = "separator"
     SUBMENU = "submenu"
 
 
-class IpcSecurity(str, Enum):
+class IpcSecurity(StrEnum):
     NONE = "none"
     AUTHENTICATED = "authenticated"
 
 
 class IpcConnectionConfig(FrozenConfig):
-    endpoint: str = Field(
-        default_factory=lambda: f"taurino-{uuid4().hex}", min_length=1
-    )
+    endpoint: str = Field(default_factory=lambda: f"taurino-{uuid4().hex}", min_length=1)
     connect_timeout: float = Field(default=10.0, gt=0)
     operation_timeout: float = Field(default=30.0, gt=0)
     handshake_timeout: float = Field(default=10.0, gt=0)
@@ -54,7 +52,7 @@ class IpcConnectionConfig(FrozenConfig):
     client_private_key_path: Path | None = None
 
     @model_validator(mode="after")
-    def ensure_security(self) -> "IpcConnectionConfig":
+    def ensure_security(self) -> IpcConnectionConfig:
         if not self.endpoint.strip():
             raise ValueError("endpoint must not be blank")
         if self.security == IpcSecurity.AUTHENTICATED:
@@ -67,9 +65,7 @@ class IpcConnectionConfig(FrozenConfig):
                     "authenticated IPC needs both identity key paths and the pinned client public key"
                 )
             if len(self.client_public_key) != 32:
-                raise ValueError(
-                    "client_public_key must contain 32 raw Ed25519 public-key bytes"
-                )
+                raise ValueError("client_public_key must contain 32 raw Ed25519 public-key bytes")
         return self
 
     def to_client_bootstrap(self) -> dict[str, Any]:
@@ -135,7 +131,7 @@ class MenuItemConfig(FrozenConfig):
     kind: MenuItemType = MenuItemType.ITEM
     enabled: bool = True
     accelerator: str | None = None
-    children: tuple["MenuItemConfig", ...] = ()
+    children: tuple[MenuItemConfig, ...] = ()
 
 
 class MenuConfig(FrozenConfig):
@@ -154,9 +150,7 @@ class Config(FrozenConfig):
     productname: str = Field(min_length=1)
     version: str = Field(min_length=1)
     app_id: UUID
-    connection: IpcConnectionConfig = Field(
-        default_factory=IpcConnectionConfig, exclude=True
-    )
+    connection: IpcConnectionConfig = Field(default_factory=IpcConnectionConfig, exclude=True)
     windows: tuple[WindowConfig, ...] = ()
     shortcuts: tuple[ShortcutConfig, ...] = ()
     trays: tuple[TrayIconConfig, ...] = ()
@@ -171,7 +165,7 @@ class Config(FrozenConfig):
         return value
 
     @model_validator(mode="after")
-    def unique_labels(self) -> "Config":
+    def unique_labels(self) -> Config:
         win_labels = [w.label for w in self.windows]
         view_labels = [v.label for w in self.windows for v in w.webviews]
         if len(set(win_labels)) != len(win_labels):
@@ -188,21 +182,22 @@ class Config(FrozenConfig):
         """
         data = self.model_dump(mode="json", by_alias=True)
         data["connection"] = self.connection.to_client_bootstrap()
-        return msgpack.packb(data, use_bin_type=True)
+
+        return cast(bytes, msgpack.packb(data, use_bin_type=True))
 
 
 class ConfigBuilder:
     """Fluent builder for validated Taurino runtime configuration."""
 
     __slots__ = (
-        "_productname",
-        "_version",
         "_app_id",
+        "_app_menu",
         "_connection",
-        "_windows",
+        "_productname",
         "_shortcuts",
         "_trays",
-        "_app_menu",
+        "_version",
+        "_windows",
     )
 
     def __init__(self) -> None:
@@ -295,19 +290,14 @@ class ConfigBuilder:
 
         if self._productname is None:
             raise ValueError(
-                "Missing application product name. "
-                "Call with_product_name() before build()."
+                "Missing application product name. Call with_product_name() before build()."
             )
 
         if self._version is None:
-            raise ValueError(
-                "Missing application version. " "Call with_version() before build()."
-            )
+            raise ValueError("Missing application version. Call with_version() before build().")
 
         if self._app_id is None:
-            raise ValueError(
-                "Missing application ID. " "Call with_app_id() before build()."
-            )
+            raise ValueError("Missing application ID. Call with_app_id() before build().")
 
         return Config(
             productname=self._productname,

@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from typing import Any
 
 from taurino import App, AppHandle, Builder, ConfigBuilder
@@ -21,6 +20,10 @@ def setup(app: App) -> None:
 
 @builder.command("greet")
 async def greet(name: str, handle: AppHandle) -> str:
+    await handle.emit("status", {"message": "Hallo JavaScript!"})
+    await handle.emit("status", {"percent": 50})
+    await handle.emit("ready", {"success": True})
+    # await handle.stop()
     return f"Hello, {name}!"
 
 
@@ -37,9 +40,6 @@ async def event_loop(
 async def main() -> None:
     app = builder.build()
     await app.run()
-
-
-
 
 
 if __name__ == "__main__":
