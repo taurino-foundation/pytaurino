@@ -56,6 +56,8 @@ tempfile = "3.27.0"
 reqwest = "0.13.5"
 percent-encoding = "2"
 parking_lot = "0.12.5"
+ctr = "0.10.1"
+ctrlc = "3.5.2"
 
 
 

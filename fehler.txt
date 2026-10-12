@@ -1,0 +1,1913 @@
+taurino[
+_internal[
+   command.py(
+"""Internal command registry with explicit dependency injection and Pydantic validation."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import Enum
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
+
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
+
+if TYPE_CHECKING:
+    from taurino.app_handle import AppHandle
+
+log = logging.getLogger(__name__)
+T = TypeVar("T")
+CommandFn = Callable[..., Any]
+Provider = Callable[[], Any]
+BeforeHook = Callable[[str, dict[str, Any]], Any]
+AfterHook = Callable[[str, dict[str, Any], dict[str, Any]], Any]
+
+
+class CommandErrorCode(str, Enum):
+    NO_HANDLER = "NO_HANDLER"
+    INVALID_PARAMS = "INVALID_PARAMS"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    DEPENDENCY_ERROR = "DEPENDENCY_ERROR"
+    EXECUTION_ERROR = "EXECUTION_ERROR"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class CommandException(Exception):
+    def __init__(self, code: CommandErrorCode, message: str, details: Any = None):
+        super().__init__(message)
+        self.code, self.message, self.details = code, message, details
+
+
+@dataclass(frozen=True, slots=True)
+class Depends:
+    """Use Annotated[T, Depends()] for explicit dependency injection."""
+
+
+class DependencyContainer:
+    def __init__(self) -> None:
+        self._singletons: dict[type[Any], Any] = {}
+        self._providers: dict[type[Any], Provider] = {}
+        self._locks: dict[type[Any], asyncio.Lock] = {}
+
+    def register_singleton(self, dep_type: type[T], instance: T) -> None:
+        if not isinstance(instance, dep_type):
+            raise TypeError(f"Expected instance of {dep_type.__name__}")
+        self._singletons[dep_type] = instance
+
+    def register_factory(
+        self, dep_type: type[T], provider: Callable[[], T | Awaitable[T]]
+    ) -> None:
+        self._providers[dep_type] = provider
+
+    async def resolve(self, dep_type: type[T]) -> T:
+        if dep_type in self._singletons:
+            return cast(T, self._singletons[dep_type])
+        if dep_type not in self._providers:
+            raise CommandException(
+                CommandErrorCode.DEPENDENCY_ERROR,
+                f"No provider for {dep_type.__name__}",
+            )
+        lock = self._locks.setdefault(dep_type, asyncio.Lock())
+        async with lock:
+            if dep_type not in self._singletons:
+                provider = self._providers[dep_type]
+                value = provider()
+                if inspect.isawaitable(value):
+                    value = await value
+                if not isinstance(value, dep_type):
+                    raise CommandException(
+                        CommandErrorCode.DEPENDENCY_ERROR,
+                        f"Provider returned wrong type for {dep_type.__name__}",
+                    )
+                self._singletons[dep_type] = value
+            return cast(T, self._singletons[dep_type])
+
+    def clear(self) -> None:
+        self._singletons.clear()
+        self._providers.clear()
+        self._locks.clear()
+
+
+@dataclass(frozen=True)
+class CompiledCommand:
+    func: CommandFn
+    validator: type[BaseModel] | None
+    injections: dict[str, type[Any] | None]  # None means AppHandle
+
+
+class CommandRegistry:
+    """Command handlers only. No IPC or Multiplexer dependency."""
+
+    def __init__(
+        self,
+        *,
+        container: DependencyContainer | None = None,
+        debug: bool = False,
+        enable_tracing: bool = True,
+    ):
+        self._app_handle: "AppHandle | None" = None
+        self._handlers: dict[str, CompiledCommand] = {}
+        self.container = container or DependencyContainer()
+        self._before: list[BeforeHook] = []
+        self._after: list[AfterHook] = []
+        self._debug = debug
+        self._enable_tracing = enable_tracing
+
+    def bind(self, app_handle: "AppHandle") -> None:
+        if self._app_handle is not None:
+            raise RuntimeError("CommandRegistry already bound")
+        self._app_handle = app_handle
+
+    def before(self, hook: BeforeHook) -> BeforeHook:
+        self._before.append(hook)
+        return hook
+
+    def after(self, hook: AfterHook) -> AfterHook:
+        self._after.append(hook)
+        return hook
+
+    def command(self, name: str | None = None) -> Callable[[CommandFn], CommandFn]:
+        def decorator(func: CommandFn) -> CommandFn:
+            self.register(name or func.__name__, func)
+            return func
+
+        return decorator
+
+    def register(self, name: str, func: CommandFn) -> None:
+        if not name.strip() or name.startswith("taurino."):
+            raise ValueError(
+                "Command name must be nonblank and must not use the reserved 'taurino.' prefix"
+            )
+        if name in self._handlers:
+            raise ValueError(f"Duplicate command: {name}")
+        self._handlers[name] = self._compile(func)
+
+    @staticmethod
+    def _compile(func: CommandFn) -> CompiledCommand:
+        from taurino.app_handle import AppHandle
+
+        signature = inspect.signature(func)
+        hints = get_type_hints(func, include_extras=True)
+        fields: dict[str, tuple[Any, Any]] = {}
+        injections: dict[str, type[Any] | None] = {}
+        for name, parameter in signature.parameters.items():
+            if parameter.kind not in (
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                raise TypeError(
+                    "Commands only accept named arguments, not *args, **kwargs or positional-only args"
+                )
+            hinted = hints.get(name, Any)
+            dependency = False
+            if get_origin(hinted) is Annotated:
+                base, *annotations = get_args(hinted)
+                dependency = any(isinstance(meta, Depends) for meta in annotations)
+                hinted = base
+            if hinted is AppHandle:
+                injections[name] = None
+            elif dependency:
+                if not isinstance(hinted, type):
+                    raise TypeError("Depends requires a concrete class")
+                injections[name] = hinted
+            else:
+                fields[name] = (
+                    hinted,
+                    (
+                        ...
+                        if parameter.default is inspect.Parameter.empty
+                        else parameter.default
+                    ),
+                )
+        validator = (
+            create_model(
+                f"Command_{func.__name__}_Params",
+                __config__=ConfigDict(extra="forbid"),
+                **fields,
+            )
+            if fields
+            else None
+        )
+        return CompiledCommand(func, validator, injections)
+
+    def list_commands(self) -> list[str]:
+        return sorted(self._handlers)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            name: {
+                "handler": f"{item.func.__module__}.{item.func.__qualname__}",
+                "async": inspect.iscoroutinefunction(item.func),
+                "params": list(item.validator.model_fields) if item.validator else [],
+                "injected": list(item.injections),
+            }
+            for name, item in self._handlers.items()
+        }
+
+    async def dispatch(
+        self, event: str, *, result_id: int, error_id: int, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        result: dict[str, Any]
+        try:
+            if not isinstance(data, dict):
+                raise CommandException(
+                    CommandErrorCode.INVALID_PARAMS, "Command data must be a mapping"
+                )
+            for hook in self._before:
+                await self._invoke_hook(hook, event, data)
+            command = self._handlers.get(event)
+            if command is None:
+                raise CommandException(
+                    CommandErrorCode.NO_HANDLER, f"No handler for '{event}'"
+                )
+            if command.validator is not None:
+                try:
+                    validated = command.validator.model_validate(data)
+                except ValidationError as exc:
+                    raise CommandException(
+                        CommandErrorCode.VALIDATION_ERROR,
+                        "Validation failed",
+                        exc.errors(include_input=False, include_url=False),
+                    ) from exc
+                bound = {
+                    name: getattr(validated, name)
+                    for name in command.validator.model_fields
+                }
+            elif data:
+                raise CommandException(
+                    CommandErrorCode.INVALID_PARAMS,
+                    "This command accepts no user parameters",
+                )
+            else:
+                bound = {}
+            for name, dep_type in command.injections.items():
+                if dep_type is None:
+                    if self._app_handle is None:
+                        raise CommandException(
+                            CommandErrorCode.INTERNAL_ERROR, "AppHandle not bound"
+                        )
+                    bound[name] = self._app_handle
+                else:
+                    bound[name] = await self.container.resolve(dep_type)
+            if inspect.iscoroutinefunction(command.func):
+                value = await command.func(**bound)
+            else:
+                # Potentially blocking synchronous handlers do not execute on the IPC loop.
+                value = await asyncio.to_thread(command.func, **bound)
+                if inspect.isawaitable(value):
+                    value = await value
+            result = {"result_id": result_id, "result": value}
+        except CommandException as exc:
+            result = self._error(error_id, exc.code, exc.message, exc.details)
+        except Exception as exc:
+            log.exception("Command '%s' failed", event)
+            result = self._error(
+                error_id,
+                CommandErrorCode.EXECUTION_ERROR,
+                "Command execution failed",
+                str(exc) if self._debug else None,
+            )
+        if self._enable_tracing:
+            result["meta"] = {
+                "event": event,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        for hook in self._after:
+            try:
+                await self._invoke_hook(hook, event, data, result)
+            except Exception:
+                log.exception("After-hook failed")
+        return result
+
+    @staticmethod
+    async def _invoke_hook(func: Callable[..., Any], *args: Any) -> None:
+        if inspect.iscoroutinefunction(func):
+            await func(*args)
+        else:
+            value = await asyncio.to_thread(func, *args)
+            if inspect.isawaitable(value):
+                await value
+
+    @staticmethod
+    def _error(
+        error_id: int, code: CommandErrorCode, message: str, details: Any
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "error_id": error_id,
+            "error": f"[{code.value}] {message}",
+            "error_obj": {"code": code.value, "message": message, "details": details},
+        }
+        return out
+
+    def close(self) -> None:
+        self.container.clear()
+        self._handlers.clear()
+
+
+def build_send_message_script(msg: dict[str, Any]) -> str:
+    """Preserve the original callback bridge helper; only use in a trusted engine context."""
+    encoded = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+    literal = json.dumps(encoded, separators=(",", ":"), ensure_ascii=False)
+    return (
+        f"window.__TAURINO_RUNCALLBACK__ && window.__TAURINO_RUNCALLBACK__({literal});"
+    )
+
+   ) 
+   connection.py(
+"""Raw local IPC server/peer; intentionally has no message routing/business handlers."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any
+
+from taurino.config import IpcConnectionConfig, IpcSecurity
+
+if TYPE_CHECKING:
+    from taunicorn import Connection, Server
+    from taunicorn.security import SecureConnection
+
+
+async def read_exact(
+    connection: "Connection", size: int, timeout: float | None
+) -> bytes:
+    chunks = bytearray()
+    async with asyncio.timeout(timeout):
+        while len(chunks) < size:
+            part = await connection.receive(size - len(chunks))
+            if not part:
+                raise EOFError("IPC peer disconnected")
+            chunks.extend(part)
+    return bytes(chunks)
+
+
+class IpcPeer:
+    def __init__(
+        self,
+        connection: "Connection",
+        *,
+        secure: "SecureConnection | None",
+        config: IpcConnectionConfig,
+    ):
+        self.connection = connection
+        self.secure = secure
+        self.config = config
+        self._send_lock = asyncio.Lock()
+        self._receive_lock = asyncio.Lock()
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def send(self, data: bytes) -> None:
+        if self._closed:
+            raise ConnectionError("IPC peer closed")
+        if not isinstance(data, bytes):
+            raise TypeError("Expected bytes")
+        if not 0 < len(data) <= self.config.max_message_size:
+            raise ValueError("Invalid message size")
+        async with self._send_lock:
+            if self._closed:
+                raise ConnectionError("IPC peer closed")
+            try:
+                async with asyncio.timeout(self.config.operation_timeout):
+                    if self.secure is not None:
+                        await self.secure.send(data)
+                    else:
+                        await self.connection.send(len(data).to_bytes(4, "big") + data)
+            except BaseException:
+                await self.close()
+                raise
+
+    async def receive(self) -> bytes:
+        if self._closed:
+            raise ConnectionError("IPC peer closed")
+        async with self._receive_lock:
+            if self._closed:
+                raise ConnectionError("IPC peer closed")
+            try:
+                async with asyncio.timeout(self.config.operation_timeout):
+                    if self.secure is not None:
+                        data = await self.secure.receive()
+                    else:
+                        header = await read_exact(self.connection, 4, None)
+                        length = int.from_bytes(header, "big")
+                        if not 0 < length <= self.config.max_message_size:
+                            raise ValueError("Invalid IPC frame")
+                        data = await read_exact(self.connection, length, None)
+                    if not 0 < len(data) <= self.config.max_message_size:
+                        raise ValueError("Invalid IPC message")
+                    return data
+            except BaseException:
+                await self.close()
+                raise
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.secure is not None:
+            await self.secure.close()
+        else:
+            await self.connection.close()
+
+
+class IpcServer:
+    """Lifecycle, client admission, and peer ownership only (no router)."""
+
+    def __init__(self, config: IpcConnectionConfig):
+        self.config = config
+        self._server: "Server | None" = None
+        self._clients: set[IpcPeer] = set()
+        self._pending = 0
+        self._closed = False
+        self._admission_lock = asyncio.Lock()
+
+    @property
+    def clients(self) -> tuple[IpcPeer, ...]:
+        return tuple(peer for peer in self._clients if not peer.closed)
+
+    @property
+    def client_count(self) -> int:
+        return len(self.clients)
+
+    @property
+    def running(self) -> bool:
+        return self._server is not None and not self._closed
+
+    async def start(self) -> None:
+        from taunicorn import Server
+
+        if self._closed or self._server is not None:
+            raise RuntimeError("Server unavailable")
+        if self.config.permissions is not None:
+            self._server = await Server.bind(
+                self.config.endpoint, mode=self.config.permissions
+            )
+        else:
+            self._server = await Server.start(self.config.endpoint)
+
+    async def accept(self) -> IpcPeer:
+        server = self._server
+        if server is None or self._closed:
+            raise RuntimeError("Server is not running")
+        connection = await server.accept()
+        reserved = False
+        try:
+            async with self._admission_lock:
+                self._clients = {peer for peer in self._clients if not peer.closed}
+                if self._closed:
+                    raise ConnectionError("Server stopped")
+                if len(self._clients) + self._pending >= self.config.max_clients:
+                    raise ConnectionError("Maximum clients reached")
+                self._pending += 1
+                reserved = True
+
+            secure = None
+            if self.config.security == IpcSecurity.AUTHENTICATED:
+                from taunicorn.security import SecureConnection
+
+                key_path = self.config.server_private_key_path
+                assert key_path is not None
+                assert self.config.client_public_key is not None
+                private_key = key_path.read_bytes()
+                if len(private_key) != 32:
+                    raise ValueError("Invalid server private key")
+                async with asyncio.timeout(self.config.handshake_timeout):
+                    secure = await SecureConnection.server(
+                        connection,
+                        identity_private_key=private_key,
+                        client_identity_public_key=self.config.client_public_key,
+                    )
+            peer = IpcPeer(connection, secure=secure, config=self.config)
+            async with self._admission_lock:
+                if self._closed:
+                    raise ConnectionError("Server stopped")
+                self._clients.add(peer)
+            return peer
+        except BaseException:
+            await connection.close()
+            raise
+        finally:
+            if reserved:
+                async with self._admission_lock:
+                    self._pending -= 1
+
+    async def disconnect(self, peer: IpcPeer) -> None:
+        async with self._admission_lock:
+            self._clients.discard(peer)
+        await peer.close()
+
+    async def stop(self) -> None:
+        async with self._admission_lock:
+            if self._closed:
+                return
+            self._closed = True
+            server, self._server = self._server, None
+            clients = tuple(self._clients)
+            self._clients.clear()
+        if server is not None:
+            await server.stop()
+        await asyncio.gather(
+            *(peer.close() for peer in clients), return_exceptions=True
+        )
+
+    async def __aenter__(self) -> "IpcServer":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.stop()
+
+   ) 
+   multiplexer.py(
+"""Per-connection async RPC; independent of CommandRegistry."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass, field, is_dataclass
+from typing import Any, TypeVar, cast
+
+import msgpack
+from pydantic import TypeAdapter
+
+from taurino.error import MultiplexerClosedError, ProtocolError, RequestIdsExhausted
+
+T = TypeVar("T")
+MAX_MESSAGE_SIZE = 1024 * 1024
+MAX_REQUEST_ID = 65535
+
+
+def pack(value: Any, *, max_size: int = MAX_MESSAGE_SIZE) -> bytes:
+    def serialize(x: Any) -> Any:
+        if is_dataclass(x) and not isinstance(x, type):
+            return asdict(x)
+        raise TypeError(f"Unsupported MessagePack value: {type(x).__name__}")
+
+    result = msgpack.packb(value, use_bin_type=True, default=serialize)
+    if len(result) > max_size:
+        raise ProtocolError("Message too large")
+    return result
+
+
+def unpack(data: bytes, *, max_size: int = MAX_MESSAGE_SIZE) -> Any:
+    if len(data) > max_size:
+        raise ProtocolError("Message too large")
+    try:
+        return msgpack.unpackb(
+            data,
+            raw=False,
+            strict_map_key=True,
+            max_str_len=max_size,
+            max_bin_len=max_size,
+            max_array_len=max_size,
+            max_map_len=max_size,
+        )
+    except (
+        ValueError,
+        msgpack.ExtraData,
+        msgpack.FormatError,
+        msgpack.StackError,
+        TypeError,
+    ) as exc:
+        raise ProtocolError("Invalid MessagePack payload") from exc
+
+
+def validate_id(value: Any) -> None:
+    if type(value) is not int or not 0 <= value <= MAX_REQUEST_ID:
+        raise ProtocolError("request_id must be a u16 integer")
+
+
+def validate_code(value: Any) -> None:
+    if type(value) is not int or not -(2**31) <= value < 2**31:
+        raise ProtocolError("code must be an i32 integer")
+
+
+@dataclass(slots=True)
+class ApiArguments:
+    value: list[Any] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, list):
+            raise ProtocolError("Arguments must be an array")
+
+    def single(self) -> Any:
+        if len(self.value) != 1:
+            raise ProtocolError("Expected exactly one argument")
+        return self.value[0]
+
+    def get(self) -> list[Any]:
+        return self.value
+
+    def optional(self, args_size: int) -> list[Any]:
+        if type(args_size) is not int or args_size < 0:
+            raise ValueError("args_size must be nonnegative")
+        return self.value + [None] * max(0, args_size - len(self.value))
+
+
+@dataclass(slots=True)
+class ApiRequest:
+    request_id: int
+    method: str
+    arguments: ApiArguments = field(default_factory=ApiArguments)
+
+    def __post_init__(self) -> None:
+        validate_id(self.request_id)
+        if not isinstance(self.method, str) or not self.method:
+            raise ProtocolError("method must be a nonempty string")
+        if not isinstance(self.arguments, ApiArguments):
+            raise ProtocolError("arguments must be ApiArguments")
+
+    @property
+    def args(self) -> ApiArguments:
+        return self.arguments
+
+    def ok(self, data: Any = None) -> "ApiResponse":
+        return ApiResponse(self.request_id, 0, "ok", data)
+
+    def err(self, code: int, message: str) -> "ApiResponse":
+        return ApiResponse(self.request_id, code, message, None)
+
+    def to_array(self) -> list[Any]:
+        return [self.request_id, self.method, self.arguments.value]
+
+    def to_msgpack(self) -> bytes:
+        return pack(self.to_array())
+
+    @classmethod
+    def from_array(cls, value: Any) -> "ApiRequest":
+        if (
+            not isinstance(value, list)
+            or len(value) != 3
+            or not isinstance(value[2], list)
+        ):
+            raise ProtocolError("Invalid ApiRequest array")
+        return cls(value[0], value[1], ApiArguments(value[2]))
+
+    @classmethod
+    def from_msgpack(cls, data: bytes) -> "ApiRequest":
+        return cls.from_array(unpack(data))
+
+
+@dataclass(slots=True)
+class ApiResponse:
+    request_id: int
+    code: int
+    message: str
+    data: Any = None
+
+    def __post_init__(self) -> None:
+        validate_id(self.request_id)
+        validate_code(self.code)
+        if not isinstance(self.message, str):
+            raise ProtocolError("message must be a string")
+
+    def to_array(self) -> list[Any]:
+        return [self.request_id, self.code, self.message, self.data]
+
+    def to_msgpack(self) -> bytes:
+        return pack(self.to_array())
+
+    @classmethod
+    def from_array(cls, value: Any) -> "ApiResponse":
+        if not isinstance(value, list) or len(value) != 4:
+            raise ProtocolError("Invalid ApiResponse array")
+        return cls(*value)
+
+    @classmethod
+    def from_msgpack(cls, data: bytes) -> "ApiResponse":
+        return cls.from_array(unpack(data))
+
+
+class ApiRemoteError(Exception):
+    def __init__(self, response: ApiResponse):
+        self.response = response
+        self.code = response.code
+        super().__init__(f"RPC error {response.code}: {response.message}")
+
+
+@dataclass(slots=True)
+class PendingRequest:
+    future: asyncio.Future[ApiResponse]
+    adapter: TypeAdapter[Any]
+
+
+class Multiplexer:
+    """One asyncio loop, one IPC session; u16 request IDs never reused in that session."""
+
+    def __init__(
+        self,
+        send: Callable[[bytes], Awaitable[None]],
+        *,
+        timeout: float | None = 30.0,
+        max_message_size: int = MAX_MESSAGE_SIZE,
+    ):
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive or None")
+        if max_message_size <= 0:
+            raise ValueError("max_message_size must be positive")
+        self._max_message_size = max_message_size
+        self._send = send
+        self._timeout = timeout
+        self._pending: dict[int, PendingRequest] = {}
+        self._adapters: dict[Any, TypeAdapter[Any]] = {}
+        self._next_id = 0
+        self._closed = False
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif self._loop is not loop:
+            raise RuntimeError("Multiplexer used from another asyncio event loop")
+        return loop
+
+    def _get_adapter(self, result_type: Any) -> TypeAdapter[Any]:
+        try:
+            adapter = self._adapters.get(result_type)
+        except TypeError:
+            return TypeAdapter(result_type)
+        if adapter is None:
+            adapter = TypeAdapter(result_type)
+            self._adapters[result_type] = adapter
+        return adapter
+
+    def _allocate_id(self) -> int:
+        if self._closed:
+            raise MultiplexerClosedError("Multiplexer closed")
+        if self._next_id > MAX_REQUEST_ID:
+            raise RequestIdsExhausted(
+                "u16 IDs exhausted; reconnect to create a fresh session"
+            )
+        request_id = self._next_id
+        self._next_id += 1
+        return request_id
+
+    async def request(
+        self,
+        method: str,
+        *args: Any,
+        result_type: type[T],
+        timeout: float | None = None,
+    ) -> ApiResponse:
+        loop = self._get_loop()
+        adapter = self._get_adapter(result_type)
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive or None")
+        request_id = self._allocate_id()
+        payload = pack(
+            ApiRequest(request_id, method, ApiArguments(list(args))).to_array(),
+            max_size=self._max_message_size,
+        )
+        future: asyncio.Future[ApiResponse] = loop.create_future()
+        self._pending[request_id] = PendingRequest(future, adapter)
+        try:
+            async with asyncio.timeout(self._timeout if timeout is None else timeout):
+                await self._send(payload)
+                response = await future
+            if response.code != 0:
+                raise ApiRemoteError(response)
+            return response
+        finally:
+            self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                # Retrieve any exception to avoid "Future exception was never retrieved".
+                future.exception()
+
+    async def call(
+        self,
+        method: str,
+        *args: Any,
+        result_type: type[T],
+        timeout: float | None = None,
+    ) -> T:
+        response = await self.request(
+            method, *args, result_type=result_type, timeout=timeout
+        )
+        return cast(T, response.data)
+
+    def resolve(self, response: ApiResponse) -> bool:
+        self._get_loop()
+        pending = self._pending.get(response.request_id)
+        if pending is None or pending.future.done():
+            return False
+        if response.code != 0:
+            pending.future.set_result(response)
+            return True
+        try:
+            validated = pending.adapter.validate_python(response.data)
+        except Exception as exc:
+            pending.future.set_exception(exc)
+        else:
+            pending.future.set_result(
+                ApiResponse(
+                    response.request_id, response.code, response.message, validated
+                )
+            )
+        return True
+
+    def feed_data(self, data: bytes) -> bool:
+        return self.resolve(ApiResponse.from_msgpack(data))
+
+    def cancel(self, request_id: int) -> bool:
+        self._get_loop()
+        pending = self._pending.get(request_id)
+        if pending is None or pending.future.done():
+            return False
+        pending.future.cancel()
+        return True
+
+    def close(self) -> None:
+        self._get_loop()
+        if self._closed:
+            return
+        self._closed = True
+        for pending in self._pending.values():
+            if not pending.future.done():
+                pending.future.set_exception(
+                    MultiplexerClosedError("Multiplexer closed")
+                )
+
+   ) 
+   runtime.py(
+"""Spawn-based child process lifecycle, suitable for GUI main-thread event loops."""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+import time
+import traceback
+from collections.abc import Callable
+from multiprocessing.connection import Connection
+from multiprocessing.context import BaseContext
+from typing import Any, Callable, Literal, Protocol
+
+from taurino.core import runtime
+from taurino.error import RuntimeStartError, RuntimeStateError
+
+
+def _gui_process_entry(config: bytes, shutdown_event: Any, status: Connection) -> None:
+    ready_sent = False
+
+    def notify_ready() -> None:
+        nonlocal ready_sent
+        if not ready_sent:
+            status.send(("ready", None))
+            ready_sent = True
+
+    try:
+        runtime(config, shutdown_event, notify_ready)
+    except BaseException:
+        try:
+            status.send(("error", traceback.format_exc()))
+        except (OSError, BrokenPipeError):
+            pass
+        raise
+    finally:
+        status.close()
+
+
+class Runtime:
+    """Internal GUI child controller. The native Rust binding runs on the child's main thread.
+
+    The target must be an importable top-level function (multiprocessing spawn).
+    It must invoke notify_ready ONLY after native setup / IPC connectivity is ready.
+    """
+
+    def __init__(
+        self,
+        config: bytes,
+        *,
+        name: str = "taurino-gui",
+        start_timeout: float = 15.0,
+        stop_timeout: float = 5.0,
+        method: Literal["spawn", "fork"] = "spawn",
+    ):
+        if start_timeout <= 0 or stop_timeout < 0:
+            raise ValueError("Invalid runtime timeout")
+        self._config, self._name = config, name
+        self._start_timeout, self._stop_timeout = start_timeout, stop_timeout
+        self._context: BaseContext = mp.get_context(method)
+        self._process: mp.Process | None = None
+        self._shutdown_event = self._context.Event()
+        self._status_connection: Connection | None = None
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process else None
+
+    @property
+    def exitcode(self) -> int | None:
+        return self._process.exitcode if self._process else None
+
+    @property
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.is_alive()
+
+    @property
+    def is_stopping(self) -> bool:
+        return self.is_running and self._shutdown_event.is_set()
+
+    def start(self) -> None:
+        if self.is_running:
+            raise RuntimeStateError("GUI runtime is already running")
+        self.close()
+        self._shutdown_event = self._context.Event()
+        parent, child = self._context.Pipe(duplex=False)
+        process = self._context.Process(
+            name=self._name,
+            target=_gui_process_entry,
+            args=(self._config, self._shutdown_event, child),
+            daemon=False,
+        )
+        self._process = process
+        self._status_connection = parent
+        try:
+            process.start()
+        except BaseException:
+            self._process = None
+            self._status_connection = None
+            parent.close()
+            process.close()
+            raise
+        finally:
+            child.close()
+        try:
+            self._wait_until_ready()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _wait_until_ready(self) -> None:
+        assert self._status_connection is not None
+        conn = self._status_connection
+        deadline = time.monotonic() + self._start_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeStartError("GUI startup timed out")
+            if conn.poll(min(remaining, 0.1)):
+                try:
+                    status, message = conn.recv()
+                except EOFError as exc:
+                    raise RuntimeStartError(
+                        "GUI process disconnected during startup"
+                    ) from exc
+                if status == "ready":
+                    if not self.is_running:
+                        raise RuntimeStartError("GUI exited during startup")
+                    return
+                if status == "error":
+                    raise RuntimeStartError(f"GUI startup failed:\n{message}")
+                raise RuntimeStartError(f"Unknown GUI status: {status}")
+            if not self.is_running:
+                raise RuntimeStartError(f"GUI exited with code {self.exitcode}")
+
+    def request_stop(self) -> None:
+        if self.is_running:
+            self._shutdown_event.set()
+
+    def stop(self, timeout: float | None = None) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.is_alive():
+            self.request_stop()
+            process.join(self._stop_timeout if timeout is None else timeout)
+            if process.is_alive():
+                process.terminate()
+                process.join(2.0)
+            if process.is_alive():
+                process.kill()
+                process.join()
+
+    def join(self, timeout: float | None = None) -> int | None:
+        if self._process is None:
+            return None
+        self._process.join(timeout)
+        return self._process.exitcode
+
+    def close(self) -> None:
+        self.stop()
+        if self._status_connection is not None:
+            self._status_connection.close()
+            self._status_connection = None
+        if self._process is not None:
+            self._process.close()
+            self._process = None
+
+   ) 
+   __init__.py(
+"""Implementation details; not exported as part of the public Taurino API."""
+
+   ) 
+]
+core[
+    _taurino.pyi(
+        from typing import Any, Callable, Protocol
+
+        def runtime(config: bytes, shutdown_event: Any, status: Callable[[], None]) -> None: ...
+
+    )
+] 
+   app_handle.py(
+"""Restricted public view of a running application."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from taurino.error import AppLifecycleError
+
+if TYPE_CHECKING:
+    from taurino.app import App
+    from taurino.config import Config
+    from taurino.state import State
+
+T = TypeVar("T")
+
+
+class AppHandle:
+    def __init__(self, app: "App") -> None:
+        self._app = app
+
+    @property
+    def config(self) -> "Config":
+        return self._app.config
+
+    @property
+    def state(self) -> "State":
+        return self._app.state
+
+    @property
+    def is_connected(self) -> bool:
+        return self._app._primary_session is not None
+
+    async def wait_connected(self, *, timeout: float | None = None) -> None:
+        if self._app._stopped:
+            raise AppLifecycleError("Application is stopped")
+        if self.is_connected:
+            return
+        async with asyncio.timeout(timeout):
+            await self._app._connected.wait()
+        if not self.is_connected:
+            raise ConnectionError("Engine disconnected")
+
+    async def call(
+        self,
+        method: str,
+        *args: Any,
+        result_type: type[T],
+        timeout: float | None = None,
+    ) -> T:
+        """Use the internal per-session Multiplexer without publishing it."""
+        session = self._app._primary_session
+        if session is None:
+            raise ConnectionError("Rust engine not connected")
+        return await session.multiplexer.call(
+            method, *args, result_type=result_type, timeout=timeout
+        )
+
+    async def stop(self) -> None:
+        await self._app.stop()
+
+    # The registry and multiplexer are deliberately *not* public properties.
+    # Internal framework methods can reach app._registry and app._primary_session.
+
+
+   ) 
+   app.py(
+
+"""Application lifecycle, startup ordering and boundary between transport and services."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from taurino._internal.command import CommandRegistry
+from taurino._internal.connection import IpcPeer, IpcServer
+from taurino._internal.multiplexer import (
+    ApiRequest,
+    ApiResponse,
+    Multiplexer,
+    pack,
+    unpack,
+)
+from taurino._internal.runtime import Runtime
+from taurino.app_handle import AppHandle
+from taurino.config import Config
+from taurino.error import AppLifecycleError, ProtocolError
+from taurino.state import State
+
+log = logging.getLogger(__name__)
+
+COMMAND_METHOD = "taurino.command"
+EVENT_METHOD = "taurino.event"
+
+
+@dataclass(eq=False)
+class _Session:
+    peer: IpcPeer
+    multiplexer: Multiplexer
+
+
+async def _invoke_hook(hook: Any, *args: Any) -> Any:
+    if inspect.iscoroutinefunction(hook):
+        return await hook(*args)
+    value = await asyncio.to_thread(hook, *args)
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+class App:
+    """Owns State, CommandRegistry, IpcServer, Multiplexer(s), and Runtime.
+
+    Startup: user setup -> bind server -> accept task -> spawn Rust -> IPC connected.
+    IpcServer never processes or routes a message; App does this here.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: Config,
+        commands: dict[str, Any],
+        setup_hook: Any,
+        event_hook: Any,
+    ) -> None:
+        self.config = config
+        self.state = State()
+        self.handle = AppHandle(self)
+        self._registry = CommandRegistry()
+        self._registry.bind(self.handle)
+        for name, fn in commands.items():
+            self._registry.register(name, fn)
+        self._setup_hook = setup_hook
+        self._event_hook = event_hook
+        self._server: IpcServer | None = None
+        self._runtime: Runtime | None = None
+        self._accept_task: asyncio.Task[None] | None = None
+        self._peer_tasks: set[asyncio.Task[Any]] = set()
+        self._primary_session: _Session | None = None
+        self._sessions: set[_Session] = set()
+        self._connected = asyncio.Event()
+        self._started = False
+        self._starting = False
+        self._stopped = False
+        self._ready_to_run = asyncio.Event()
+
+    @property
+    def is_running(self) -> bool:
+        return self._started and not self._stopped
+
+    @property
+    def engine_pid(self) -> int | None:
+        return self._runtime.pid if self._runtime else None
+
+    def configure(self, config: Config) -> None:
+        """Replace global config only during Builder.setup, before IPC is bound."""
+        if not self._starting or self._server is not None:
+            raise AppLifecycleError("App.configure is only allowed in the setup hook")
+        self.config = config
+
+    async def start(self, start_method: Literal["spawn", "fork"] = "spawn") -> None:
+        if self._started or self._starting or self._stopped:
+            raise AppLifecycleError("Application has already started or stopped")
+        self._starting = True
+        try:
+            if self._setup_hook is not None:
+                await _invoke_hook(self._setup_hook, self)
+            self._server = IpcServer(self.config.connection)
+            await self._server.start()  # MUST finish before the Rust child process starts.
+            self._accept_task = asyncio.create_task(
+                self._accept_forever(), name="taurino-accept"
+            )
+            self._runtime = Runtime(
+                self.config.to_engine_bytes(),
+                start_timeout=self.config.connection.connect_timeout + 10.0,
+                method=start_method,
+            )
+            # multiprocessing spawn + readiness handshake must never block the asyncio server loop.
+            await asyncio.to_thread(self._runtime.start)
+            await self.handle.wait_connected(
+                timeout=self.config.connection.connect_timeout
+            )
+            self._started = True
+            self._ready_to_run.set()
+        except BaseException:
+            await self.stop()
+            raise
+        finally:
+            self._starting = False
+
+    async def run_forever(self) -> int | None:
+        """Block asynchronously until the child exits; always shut down the Python side."""
+        await self.start()
+        try:
+            assert self._runtime is not None
+            return await asyncio.to_thread(self._runtime.join)
+        finally:
+            await self.stop()
+
+    async def _accept_forever(self) -> None:
+        assert self._server is not None
+        while not self._stopped:
+            try:
+                peer = await self._server.accept()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                if self._stopped:
+                    break
+                log.exception("IPC accept failed")
+                await asyncio.sleep(0.1)
+                continue
+            task = asyncio.create_task(self._serve_peer(peer), name="taurino-peer")
+            self._peer_tasks.add(task)
+            task.add_done_callback(self._peer_tasks.discard)
+
+    async def _serve_peer(self, peer: IpcPeer) -> None:
+        assert self._server is not None
+        session = _Session(
+            peer,
+            Multiplexer(
+                peer.send,
+                timeout=self.config.connection.operation_timeout,
+                max_message_size=self.config.connection.max_message_size,
+            ),
+        )
+        self._sessions.add(session)
+        if self._primary_session is None:
+            self._primary_session = session
+            self._connected.set()
+        # Backpressure: tasks are created only after acquiring a bounded slot.
+        capacity = asyncio.Semaphore(64)
+        messages: set[asyncio.Task[None]] = set()
+        try:
+            while not self._stopped:
+                raw = await peer.receive()
+                value = unpack(raw, max_size=self.config.connection.max_message_size)
+                if isinstance(value, list) and len(value) == 4:
+                    session.multiplexer.resolve(ApiResponse.from_array(value))
+                    continue
+                request = ApiRequest.from_array(value)
+                await capacity.acquire()
+                task = asyncio.create_task(
+                    self._dispatch_request(session, request, capacity),
+                    name=f"taurino-req-{request.request_id}",
+                )
+                messages.add(task)
+                task.add_done_callback(messages.discard)
+        except asyncio.CancelledError:
+            pass
+        except (EOFError, ConnectionError, TimeoutError):
+            log.info("IPC session disconnected")
+        except (ProtocolError, ValueError):
+            log.warning("Rejected invalid IPC message", exc_info=True)
+        except Exception:
+            log.exception("IPC session failed")
+        finally:
+            for task in messages:
+                task.cancel()
+            if messages:
+                await asyncio.gather(*messages, return_exceptions=True)
+            session.multiplexer.close()
+            await self._server.disconnect(peer)
+            self._sessions.discard(session)
+            if self._primary_session is session:
+                self._primary_session = next(iter(self._sessions), None)
+                if self._primary_session is None:
+                    self._connected.clear()
+
+    async def _dispatch_request(
+        self, session: _Session, request: ApiRequest, capacity: asyncio.Semaphore
+    ) -> None:
+        try:
+            if request.method == COMMAND_METHOD:
+                args = request.args.value
+                if (
+                    len(args) != 4
+                    or not isinstance(args[0], str)
+                    or not isinstance(args[1], int)
+                    or not isinstance(args[2], int)
+                    or not isinstance(args[3], dict)
+                ):
+                    response = request.err(
+                        400,
+                        "Command arguments must be [name, result_id, error_id, data]",
+                    )
+                else:
+                    name, result_id, error_id, data = args
+                    result = await self._registry.dispatch(
+                        name, result_id=result_id, error_id=error_id, data=data
+                    )
+                    response = request.ok(result)
+            elif request.method == EVENT_METHOD:
+                if len(request.args.value) != 1:
+                    response = request.err(
+                        400, "Event arguments must contain exactly one event"
+                    )
+                else:
+                    if self._event_hook is not None:
+                        await _invoke_hook(
+                            self._event_hook, self.handle, request.args.single()
+                        )
+                    response = request.ok(None)
+            else:
+                response = request.err(404, "Unknown internal IPC method")
+            await session.peer.send(
+                pack(
+                    response.to_array(),
+                    max_size=self.config.connection.max_message_size,
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Request dispatch failed")
+            try:
+                await session.peer.send(
+                    pack(request.err(500, "Internal dispatch error").to_array())
+                )
+            except Exception:
+                log.exception("Failed to send dispatch error")
+        finally:
+            capacity.release()
+
+    async def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self._ready_to_run.set()
+        self._connected.clear()
+        # Stop Rust before closing the local IPC server to enable graceful client exit.
+        if self._runtime is not None:
+            await asyncio.to_thread(self._runtime.close)
+            self._runtime = None
+        if self._accept_task is not None:
+            self._accept_task.cancel()
+            await asyncio.gather(self._accept_task, return_exceptions=True)
+            self._accept_task = None
+        if self._server is not None:
+            await self._server.stop()
+            self._server = None
+        current = asyncio.current_task()
+        to_cancel = [task for task in self._peer_tasks if task is not current]
+        for task in to_cancel:
+            task.cancel()
+        if to_cancel:
+            await asyncio.gather(*to_cancel, return_exceptions=True)
+        self._peer_tasks.clear()
+        self._primary_session = None
+        self._sessions.clear()
+        self._registry.close()
+        self._started = False
+
+    async def __aenter__(self) -> "App":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        await self.stop()
+
+   ) 
+   builder.py(
+"""Public declarative Builder: configuration, commands and lifecycle hooks."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any, overload
+
+from taurino.app import App
+
+from .config import Config
+
+Hook = Callable[..., Any]
+
+
+class Builder:
+    def __init__(self, config: Config):
+        self.config = config
+        self._setup_hook: Hook | None = None
+        self._event_loop_hook: Hook | None = None
+        self._commands: dict[str, Hook] = {}
+        self._built = False
+
+    def command(self, name: str | None = None) -> Callable[[Hook], Hook]:
+        """Register a command without exposing the CommandRegistry."""
+
+        def decorator(fn: Hook) -> Hook:
+            if self._built:
+                raise RuntimeError("Builder is already built")
+            command_name = name or fn.__name__
+            if command_name in self._commands:
+                raise ValueError(f"Duplicate command: {command_name}")
+            self._commands[command_name] = fn
+            return fn
+
+        return decorator
+
+    @overload
+    def setup(self, hook: Hook) -> Hook: ...
+
+    @overload
+    def setup(self) -> Callable[[Hook], Hook]: ...
+
+    def setup(self, hook: Hook | None = None) -> Hook | Callable[[Hook], Hook]:
+        def register(fn: Hook) -> Hook:
+            if self._built or self._setup_hook is not None or not callable(fn):
+                raise RuntimeError(
+                    "Setup hook already registered, invalid, or builder is built"
+                )
+            self._setup_hook = fn
+            return fn
+
+        return register(hook) if hook is not None else register
+
+    @overload
+    def on_event(self, hook: Hook) -> Hook: ...
+
+    @overload
+    def on_event(self) -> Callable[[Hook], Hook]: ...
+
+    def on_event(self, hook: Hook | None = None) -> Hook | Callable[[Hook], Hook]:
+        def register(fn: Hook) -> Hook:
+            if self._built or self._event_loop_hook is not None or not callable(fn):
+                raise RuntimeError(
+                    "Event-loop hook already registered, invalid, or builder is built"
+                )
+            self._event_loop_hook = fn
+            return fn
+
+        return register(hook) if hook is not None else register
+
+    # Alias to match the original pasted Builder.run event-hook decorator.
+    run = on_event
+
+    def build(self) -> "App":
+        """Build exactly one App; native bridge target is optional but must exist at runtime."""
+        from .app import App
+
+        if self._built:
+            raise RuntimeError("Builder already used")
+        app = App(
+            config=self.config,
+            commands=dict(self._commands),
+            setup_hook=self._setup_hook,
+            event_hook=self._event_loop_hook,
+        )
+        self._built = True
+        return app
+
+
+   ) 
+   config.py(
+"""Validated Pydantic configuration and safe Rust bootstrap serialization."""
+
+from __future__ import annotations
+
+from enum import Enum
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+import msgpack
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def to_camel(name: str) -> str:
+    parts = name.split("_")
+    return parts[0] + "".join(p.title() for p in parts[1:])
+
+
+class FrozenConfig(BaseModel):
+    model_config = ConfigDict(
+        frozen=True, populate_by_name=True, alias_generator=to_camel, extra="forbid"
+    )
+
+
+class WindowPosition(str, Enum):
+    CENTER = "center"
+    DEFAULT = "default"
+
+
+class MenuItemType(str, Enum):
+    ITEM = "item"
+    SEPARATOR = "separator"
+    SUBMENU = "submenu"
+
+
+class IpcSecurity(str, Enum):
+    NONE = "none"
+    AUTHENTICATED = "authenticated"
+
+
+class IpcConnectionConfig(FrozenConfig):
+    endpoint: str = Field(
+        default_factory=lambda: f"taurino-{uuid4().hex}", min_length=1
+    )
+    connect_timeout: float = Field(default=10.0, gt=0)
+    operation_timeout: float = Field(default=30.0, gt=0)
+    handshake_timeout: float = Field(default=10.0, gt=0)
+    max_message_size: int = Field(default=1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    max_clients: int = Field(default=1, ge=1, le=256)
+    permissions: int | str | None = None
+    security: IpcSecurity = IpcSecurity.NONE
+    server_private_key_path: Path | None = None
+    client_public_key: bytes | None = None
+    client_private_key_path: Path | None = None
+
+    @model_validator(mode="after")
+    def ensure_security(self) -> "IpcConnectionConfig":
+        if not self.endpoint.strip():
+            raise ValueError("endpoint must not be blank")
+        if self.security == IpcSecurity.AUTHENTICATED:
+            if (
+                not self.server_private_key_path
+                or not self.client_private_key_path
+                or self.client_public_key is None
+            ):
+                raise ValueError(
+                    "authenticated IPC needs both identity key paths and the pinned client public key"
+                )
+            if len(self.client_public_key) != 32:
+                raise ValueError(
+                    "client_public_key must contain 32 raw Ed25519 public-key bytes"
+                )
+        return self
+
+    def to_client_bootstrap(self) -> dict[str, Any]:
+        """Never expose the Python server private key in the engine config."""
+        out: dict[str, Any] = {
+            "endpoint": self.endpoint,
+            "connectTimeout": self.connect_timeout,
+            "operationTimeout": self.operation_timeout,
+            "handshakeTimeout": self.handshake_timeout,
+            "maxMessageSize": self.max_message_size,
+            "security": self.security.value,
+        }
+        if self.security == IpcSecurity.AUTHENTICATED:
+            from taunicorn.security import identity_public_key
+
+            assert self.server_private_key_path is not None
+            assert self.client_private_key_path is not None
+            server_private = self.server_private_key_path.read_bytes()
+            if len(server_private) != 32:
+                raise ValueError("server Ed25519 private key must be exactly 32 bytes")
+            out["serverPublicKey"] = identity_public_key(server_private)
+            out["clientPrivateKeyPath"] = str(self.client_private_key_path)
+        return out
+
+
+class WebViewConfig(FrozenConfig):
+    url: str
+    label: str = Field(min_length=1)
+    x: int = 0
+    y: int = 0
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    visible: bool = True
+    devtools: bool = False
+
+
+class WindowConfig(FrozenConfig):
+    label: str = Field(min_length=1)
+    center: bool = True
+    title: str = "Taurino"
+    width: int = Field(default=1000, gt=0)
+    height: int = Field(default=700, gt=0)
+    min_width: int | None = Field(default=None, gt=0)
+    min_height: int | None = Field(default=None, gt=0)
+    resizable: bool = True
+    decorations: bool = True
+    transparent: bool = False
+    visible: bool = True
+    fullscreen: bool = False
+    maximized: bool = False
+    webviews: tuple[WebViewConfig, ...] = ()
+
+
+class ShortcutConfig(FrozenConfig):
+    accelerator: str
+    action: str
+    enabled: bool = True
+
+
+class MenuItemConfig(FrozenConfig):
+    id: str
+    text: str = ""
+    kind: MenuItemType = MenuItemType.ITEM
+    enabled: bool = True
+    accelerator: str | None = None
+    children: tuple["MenuItemConfig", ...] = ()
+
+
+class MenuConfig(FrozenConfig):
+    items: tuple[MenuItemConfig, ...] = ()
+
+
+class TrayIconConfig(FrozenConfig):
+    id: str
+    icon: str | None = None
+    tooltip: str | None = None
+    visible: bool = True
+    menu: MenuConfig | None = None
+
+
+class Config(FrozenConfig):
+    productname: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    app_id: UUID
+    connection: IpcConnectionConfig = Field(
+        default_factory=IpcConnectionConfig, exclude=True
+    )
+    windows: tuple[WindowConfig, ...] = ()
+    shortcuts: tuple[ShortcutConfig, ...] = ()
+    trays: tuple[TrayIconConfig, ...] = ()
+    app_menu: MenuConfig | None = None
+    schema_version: int = Field(default=1, ge=1, le=1)
+
+    @field_validator("productname", "version")
+    @classmethod
+    def non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def unique_labels(self) -> "Config":
+        win_labels = [w.label for w in self.windows]
+        view_labels = [v.label for w in self.windows for v in w.webviews]
+        if len(set(win_labels)) != len(win_labels):
+            raise ValueError("Duplicate window labels")
+        if len(set(view_labels)) != len(view_labels):
+            raise ValueError("Duplicate WebView labels")
+        return self
+
+    def to_engine_bytes(self) -> bytes:
+        """Serialize actual app config plus the *client-only* IPC bootstrap using MessagePack.
+
+        Rust must use a compatible serde naming scheme and this versioned schema.
+        No server-side private identity key is transferred.
+        """
+        data = self.model_dump(mode="json", by_alias=True)
+        data["connection"] = self.connection.to_client_bootstrap()
+        return msgpack.packb(data, use_bin_type=True)
+
+
+   ) 
+   error.py(
+"""Public errors and protocol exceptions."""
+
+
+class TaurinoError(Exception):
+    """Base error for this package."""
+
+
+class StateAlreadyExistsError(TaurinoError):
+    pass
+
+
+class StateNotFoundError(TaurinoError):
+    pass
+
+
+class ProtocolError(TaurinoError):
+    pass
+
+
+class MultiplexerClosedError(TaurinoError):
+    pass
+
+
+class RequestIdsExhausted(TaurinoError):
+    pass
+
+
+class RuntimeStartError(TaurinoError):
+    pass
+
+
+class RuntimeStateError(TaurinoError):
+    pass
+
+
+class AppLifecycleError(TaurinoError):
+    pass
+
+
+   ) 
+   state.py(
+"""Thread-safe typed application state."""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
+
+from .error import StateAlreadyExistsError, StateNotFoundError
+
+T = TypeVar("T")
+
+
+class State:
+    """Stores one object per *exact* Python type; a registry, not a deep-copy store."""
+
+    def __init__(self) -> None:
+        self._values: dict[type[Any], Any] = {}
+        self._lock = threading.RLock()
+
+    def set(self, value: T, *, replace: bool = True) -> T:
+        key = type(value)
+        with self._lock:
+            if not replace and key in self._values:
+                raise StateAlreadyExistsError(f"State already exists: {key.__name__}")
+            self._values[key] = value
+        return value
+
+    def get(self, state_type: type[T]) -> T:
+        with self._lock:
+            try:
+                return cast(T, self._values[state_type])
+            except KeyError:
+                raise StateNotFoundError(
+                    f"State not found: {state_type.__name__}"
+                ) from None
+
+    def try_get(self, state_type: type[T]) -> T | None:
+        with self._lock:
+            return cast(T | None, self._values.get(state_type))
+
+    def contains(self, state_type: type[Any]) -> bool:
+        with self._lock:
+            return state_type in self._values
+
+    def remove(self, state_type: type[T]) -> T:
+        with self._lock:
+            try:
+                return cast(T, self._values.pop(state_type))
+            except KeyError:
+                raise StateNotFoundError(
+                    f"State not found: {state_type.__name__}"
+                ) from None
+
+    def get_or_create(self, state_type: type[T], factory: Callable[[], T]) -> T:
+        with self._lock:
+            if state_type not in self._values:
+                value = factory()
+                if not isinstance(value, state_type):
+                    raise TypeError("Factory returned an incompatible type")
+                self._values[state_type] = value
+            return cast(T, self._values[state_type])
+
+    def update(self, state_type: type[T], updater: Callable[[T], T]) -> T:
+        with self._lock:
+            updated = updater(self.get(state_type))
+            if not isinstance(updated, state_type):
+                raise TypeError("Updater returned an incompatible type")
+            self._values[state_type] = updated
+            return updated
+
+    def clear(self) -> None:
+        with self._lock:
+            self._values.clear()
+
+    def snapshot(self) -> dict[type[Any], Any]:
+        with self._lock:
+            return self._values.copy()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._values)
+
+
+   ) 
+
+   __init__.py(
+"""Public Taurino API. IPC, multiplexing and process supervision remain internal."""
+
+from .app import App
+from .app_handle import AppHandle
+from .builder import Builder
+from .config import (
+    Config,
+    IpcConnectionConfig,
+    IpcSecurity,
+    MenuConfig,
+    MenuItemConfig,
+    MenuItemType,
+    ShortcutConfig,
+    TrayIconConfig,
+    WebViewConfig,
+    WindowConfig,
+    WindowPosition,
+)
+from .state import State
+
+__all__ = [
+    "App",
+    "AppHandle",
+    "Builder",
+    "Config",
+    "IpcConnectionConfig",
+    "IpcSecurity",
+    "MenuConfig",
+    "MenuItemConfig",
+    "MenuItemType",
+    "ShortcutConfig",
+    "TrayIconConfig",
+    "WebViewConfig",
+    "WindowConfig",
+    "WindowPosition",
+    "State",
+]
+
+   ) 
+]
+
+
+main.py(
+import asyncio
+from uuid import uuid4
+from taurino import Builder, Config, IpcConnectionConfig, App, AppHandle
+
+builder = Builder(
+    Config(
+        productname="My App",
+        version="0.1.0",
+        app_id=uuid4(),
+        connection=IpcConnectionConfig(endpoint=f"taurino-{uuid4().hex}"),
+    )
+)
+
+
+@builder.setup()
+def setup(app: App) -> None:
+    # create State and optionally call app.configure(new_config)
+    app.state.set({"initialized": True})
+
+
+@builder.command("greet")
+async def greet(name: str, handle: AppHandle) -> str:
+    return f"Hello, {name}!"
+
+
+@builder.on_event()  # alternatively @builder.run()
+async def event_loop_hook(handle: AppHandle, event: dict) -> None:
+    print(event)
+
+
+async def main() -> None:
+    app = builder.build()  # default requires taurino.engine.runtime (compiled PyO3)
+    async with app:
+        res = await app.handle.call("engine.ping", result_type=str)
+        if res == "pong":
+            pass
+        
+        print(res)
+        
+        
+    while True:
+        await asyncio.sleep(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+)

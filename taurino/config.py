@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import msgpack
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -189,3 +189,294 @@ class Config(FrozenConfig):
         data = self.model_dump(mode="json", by_alias=True)
         data["connection"] = self.connection.to_client_bootstrap()
         return msgpack.packb(data, use_bin_type=True)
+
+
+class ConfigBuilder:
+    """Fluent builder for validated Taurino runtime configuration."""
+
+    __slots__ = (
+        "_productname",
+        "_version",
+        "_app_id",
+        "_connection",
+        "_windows",
+        "_shortcuts",
+        "_trays",
+        "_app_menu",
+    )
+
+    def __init__(self) -> None:
+        self._productname: str | None = None
+        self._version: str | None = None
+        self._app_id: UUID | None = None
+
+        # Generate one stable IPC endpoint per builder instance.
+        self._connection = IpcConnectionConfig()
+
+        self._windows: list[WindowConfig] = []
+        self._shortcuts: list[ShortcutConfig] = []
+        self._trays: list[TrayIconConfig] = []
+        self._app_menu: MenuConfig | None = None
+
+    # --------------------------------------------------
+    # Application metadata
+    # --------------------------------------------------
+
+    def with_product_name(self, name: str) -> ConfigBuilder:
+        self._productname = name
+        return self
+
+    def with_version(self, version: str) -> ConfigBuilder:
+        self._version = version
+        return self
+
+    def with_app_id(self, app_id: UUID) -> ConfigBuilder:
+        self._app_id = app_id
+        return self
+
+    # --------------------------------------------------
+    # IPC connection
+    # --------------------------------------------------
+
+    def with_connection(self, connection: IpcConnectionConfig) -> ConfigBuilder:
+        self._connection = connection
+        return self
+
+    # --------------------------------------------------
+    # Windows
+    # --------------------------------------------------
+
+    def add_window(self, window: WindowConfig) -> ConfigBuilder:
+        self._windows.append(window)
+        return self
+
+    def with_windows(self, *windows: WindowConfig) -> ConfigBuilder:
+        self._windows = list(windows)
+        return self
+
+    # --------------------------------------------------
+    # Shortcuts
+    # --------------------------------------------------
+
+    def add_shortcut(self, shortcut: ShortcutConfig) -> ConfigBuilder:
+        self._shortcuts.append(shortcut)
+        return self
+
+    def with_shortcuts(self, *shortcuts: ShortcutConfig) -> ConfigBuilder:
+        self._shortcuts = list(shortcuts)
+        return self
+
+    # --------------------------------------------------
+    # Tray icons
+    # --------------------------------------------------
+
+    def add_tray(self, tray: TrayIconConfig) -> ConfigBuilder:
+        self._trays.append(tray)
+        return self
+
+    def with_trays(self, *trays: TrayIconConfig) -> ConfigBuilder:
+        self._trays = list(trays)
+        return self
+
+    # --------------------------------------------------
+    # Application menu
+    # --------------------------------------------------
+
+    def with_app_menu(self, menu: MenuConfig | None) -> ConfigBuilder:
+        self._app_menu = menu
+        return self
+
+    # --------------------------------------------------
+    # Build
+    # --------------------------------------------------
+
+    def build(self) -> Config:
+        """Build and validate an immutable configuration."""
+
+        if self._productname is None:
+            raise ValueError(
+                "Missing application product name. "
+                "Call with_product_name() before build()."
+            )
+
+        if self._version is None:
+            raise ValueError(
+                "Missing application version. " "Call with_version() before build()."
+            )
+
+        if self._app_id is None:
+            raise ValueError(
+                "Missing application ID. " "Call with_app_id() before build()."
+            )
+
+        return Config(
+            productname=self._productname,
+            version=self._version,
+            app_id=self._app_id,
+            connection=self._connection,
+            windows=tuple(self._windows),
+            shortcuts=tuple(self._shortcuts),
+            trays=tuple(self._trays),
+            app_menu=self._app_menu,
+        )
+
+    def to_engine_bytes(self) -> bytes:
+        """Build and serialize the configuration for Rust."""
+        return self.build().to_engine_bytes()
+
+    # --------------------------------------------------
+    # Factory
+    # --------------------------------------------------
+
+    @classmethod
+    def from_config(cls, config: Config) -> ConfigBuilder:
+        """Create a builder from an existing configuration."""
+
+        return (
+            cls()
+            .with_product_name(config.productname)
+            .with_version(config.version)
+            .with_app_id(config.app_id)
+            .with_connection(config.connection)
+            .with_windows(*config.windows)
+            .with_shortcuts(*config.shortcuts)
+            .with_trays(*config.trays)
+            .with_app_menu(config.app_menu)
+        )
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        product_name: str = "Taurino",
+        version: str = "0.1.0",
+        app_id: UUID | None = None,
+        webview_url: str = "about:blank",
+    ) -> ConfigBuilder:
+        """Create a fully initialized runtime configuration builder."""
+
+        if app_id is None:
+            app_id = uuid5(
+                NAMESPACE_URL,
+                f"taurino://{product_name.strip().lower()}",
+            )
+
+        # --------------------------------------------------
+        # IPC configuration
+        # --------------------------------------------------
+
+        connection = IpcConnectionConfig(
+            endpoint=f"taurino-{uuid4().hex}",
+            connect_timeout=10.0,
+            operation_timeout=30.0,
+            handshake_timeout=10.0,
+            max_message_size=1024 * 1024,
+            max_clients=1,
+            permissions=None,
+            security=IpcSecurity.NONE,
+            server_private_key_path=None,
+            client_public_key=None,
+            client_private_key_path=None,
+        )
+
+        # --------------------------------------------------
+        # WebView configuration
+        # --------------------------------------------------
+
+        webview = WebViewConfig(
+            label="main-webview",
+            url=webview_url,
+            x=0,
+            y=0,
+            width=None,
+            height=None,
+            visible=True,
+            devtools=False,
+        )
+
+        # --------------------------------------------------
+        # Window configuration
+        # --------------------------------------------------
+
+        window = WindowConfig(
+            label="main",
+            title=product_name,
+            center=True,
+            width=1000,
+            height=700,
+            min_width=None,
+            min_height=None,
+            resizable=True,
+            decorations=True,
+            transparent=False,
+            visible=True,
+            fullscreen=False,
+            maximized=False,
+            webviews=(webview,),
+        )
+
+        # --------------------------------------------------
+        # Shortcut configuration
+        # --------------------------------------------------
+
+        shortcuts: tuple[ShortcutConfig, ...] = (
+            ShortcutConfig(
+                accelerator="Ctrl+Q",
+                action="app.quit",
+                enabled=False,
+            ),
+        )
+
+        # --------------------------------------------------
+        # Application menu configuration
+        # --------------------------------------------------
+
+        app_menu = MenuConfig(
+            items=(
+                MenuItemConfig(
+                    id="application",
+                    text="Application",
+                    kind=MenuItemType.SUBMENU,
+                    enabled=True,
+                    accelerator=None,
+                    children=(
+                        MenuItemConfig(
+                            id="app.quit",
+                            text="Quit",
+                            kind=MenuItemType.ITEM,
+                            enabled=False,
+                            accelerator=None,
+                            children=(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        # --------------------------------------------------
+        # Tray configuration
+        # --------------------------------------------------
+
+        tray = TrayIconConfig(
+            id="main-tray",
+            icon=None,
+            tooltip=product_name,
+            visible=False,
+            menu=MenuConfig(items=()),
+        )
+
+        # --------------------------------------------------
+        # Build fluent configuration
+        # --------------------------------------------------
+
+        return (
+            cls()
+            .with_product_name(product_name)
+            .with_version(version)
+            .with_app_id(app_id)
+            .with_connection(connection)
+            .with_windows(window)
+            .with_shortcuts(*shortcuts)
+            .with_trays(tray)
+            .with_app_menu(app_menu)
+        )

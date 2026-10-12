@@ -14,23 +14,36 @@ from taurino.core import runtime
 from taurino.error import RuntimeStartError, RuntimeStateError
 
 
-def _gui_process_entry(config: bytes, shutdown_event: Any, status: Connection) -> None:
+def _gui_process_entry(
+    config: bytes,
+    shutdown_event: Any,
+    status: Connection,
+) -> None:
     ready_sent = False
 
     def notify_ready() -> None:
         nonlocal ready_sent
+
         if not ready_sent:
             status.send(("ready", None))
             ready_sent = True
 
     try:
         runtime(config, shutdown_event, notify_ready)
+
+    except KeyboardInterrupt:
+        print("Keyboard interrupt detected. Exiting...")
+        shutdown_event.set()
+
     except BaseException:
-        try:
-            status.send(("error", traceback.format_exc()))
-        except (OSError, BrokenPipeError):
-            pass
+        if not ready_sent:
+            try:
+                status.send(("error", traceback.format_exc()))
+            except (OSError, BrokenPipeError, EOFError):
+                pass
+
         raise
+
     finally:
         status.close()
 

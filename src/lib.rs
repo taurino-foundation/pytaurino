@@ -5,7 +5,7 @@ use std::{
     },
     thread,
 };
-
+pub mod js_ipc;
 use anyhow::{Context, Result};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -48,11 +48,17 @@ fn run_native(config: Vec<u8>, shutdown_event: Py<PyAny>, notify_ready: Py<PyAny
 
     // Must run on the child process main thread.
     let mut event_loop = EventLoopBuilder::<EventLoopMessage>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
-
+    let base_proxy = event_loop.create_proxy();
+    let ipc_proxy = base_proxy.clone();
+    let _signal_proxy = base_proxy.clone();
     let _ipc_client = IpcClient::new(&_config.connection, move |event| {
-        let _ = proxy.send_event(EventLoopMessage::IPC(event));
+        let _ = ipc_proxy.send_event(EventLoopMessage::IPC(event));
     })?;
+    /*     ctrlc::set_handler(move || {
+        println!("Keyboard interrupt detected. Exiting...");
+        let _ = _signal_proxy.send_event(EventLoopMessage::Shutdown);
+    })?; */
+
     let window = WindowBuilder::new()
         .with_title("Taurino App")
         // .with_inner_size(tao::dpi::LogicalSize::new(config.width, config.height))

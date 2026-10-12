@@ -13,8 +13,7 @@ Hook = Callable[..., Any]
 
 
 class Builder:
-    def __init__(self, config: Config):
-        self.config = config
+    def __init__(self):
         self._setup_hook: Hook | None = None
         self._event_loop_hook: Hook | None = None
         self._commands: dict[str, Hook] = {}
@@ -78,7 +77,6 @@ class Builder:
         if self._built:
             raise RuntimeError("Builder already used")
         app = App(
-            config=self.config,
             commands=dict(self._commands),
             setup_hook=self._setup_hook,
             event_hook=self._event_loop_hook,

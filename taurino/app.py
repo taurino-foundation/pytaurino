@@ -6,7 +6,8 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Optional
+from uuid import uuid4
 
 from taurino._internal.command import CommandRegistry
 from taurino._internal.connection import IpcPeer, IpcServer
@@ -19,7 +20,7 @@ from taurino._internal.multiplexer import (
 )
 from taurino._internal.runtime import Runtime
 from taurino.app_handle import AppHandle
-from taurino.config import Config
+from taurino.config import Config, ConfigBuilder, IpcConnectionConfig
 from taurino.error import AppLifecycleError, ProtocolError
 from taurino.state import State
 
@@ -50,16 +51,14 @@ class App:
     Startup: user setup -> bind server -> accept task -> spawn Rust -> IPC connected.
     IpcServer never processes or routes a message; App does this here.
     """
-
     def __init__(
         self,
         *,
-        config: Config,
         commands: dict[str, Any],
         setup_hook: Any,
         event_hook: Any,
     ) -> None:
-        self.config = config
+        self.config: ConfigBuilder = ConfigBuilder()
         self.state = State()
         self.handle = AppHandle(self)
         self._registry = CommandRegistry()
@@ -92,29 +91,34 @@ class App:
         """Replace global config only during Builder.setup, before IPC is bound."""
         if not self._starting or self._server is not None:
             raise AppLifecycleError("App.configure is only allowed in the setup hook")
-        self.config = config
+        self.config = ConfigBuilder.from_config(config)
 
-    async def start(self, start_method: Literal["spawn", "fork"] = "spawn") -> None:
+    async def __start(self, start_method: Literal["spawn", "fork"] = "spawn") -> None:
+        if self.config is None:
+            raise RuntimeError(
+                "Application configuration is missing. "
+                "Initialize the application using App.configure() first."
+            )
         if self._started or self._starting or self._stopped:
             raise AppLifecycleError("Application has already started or stopped")
         self._starting = True
         try:
             if self._setup_hook is not None:
                 await _invoke_hook(self._setup_hook, self)
-            self._server = IpcServer(self.config.connection)
+            self._server = IpcServer(self.config._connection)
             await self._server.start()  # MUST finish before the Rust child process starts.
             self._accept_task = asyncio.create_task(
                 self._accept_forever(), name="taurino-accept"
             )
             self._runtime = Runtime(
                 self.config.to_engine_bytes(),
-                start_timeout=self.config.connection.connect_timeout + 10.0,
+                start_timeout=self.config._connection.connect_timeout + 10.0,
                 method=start_method,
             )
             # multiprocessing spawn + readiness handshake must never block the asyncio server loop.
             await asyncio.to_thread(self._runtime.start)
             await self.handle.wait_connected(
-                timeout=self.config.connection.connect_timeout
+                timeout=self.config._connection.connect_timeout
             )
             self._started = True
             self._ready_to_run.set()
@@ -124,9 +128,9 @@ class App:
         finally:
             self._starting = False
 
-    async def run_forever(self) -> int | None:
+    async def run(self, start_method: Literal["spawn", "fork"] = "spawn") -> int | None:
         """Block asynchronously until the child exits; always shut down the Python side."""
-        await self.start()
+        await self.__start(start_method)
         try:
             assert self._runtime is not None
             return await asyncio.to_thread(self._runtime.join)
@@ -156,8 +160,8 @@ class App:
             peer,
             Multiplexer(
                 peer.send,
-                timeout=self.config.connection.operation_timeout,
-                max_message_size=self.config.connection.max_message_size,
+                timeout=self.config._connection.operation_timeout,
+                max_message_size=self.config._connection.max_message_size,
             ),
         )
         self._sessions.add(session)
@@ -170,7 +174,7 @@ class App:
         try:
             while not self._stopped:
                 raw = await peer.receive()
-                value = unpack(raw, max_size=self.config.connection.max_message_size)
+                value = unpack(raw, max_size=self.config._connection.max_message_size)
                 if isinstance(value, list) and len(value) == 4:
                     session.multiplexer.resolve(ApiResponse.from_array(value))
                     continue
@@ -242,7 +246,7 @@ class App:
             await session.peer.send(
                 pack(
                     response.to_array(),
-                    max_size=self.config.connection.max_message_size,
+                    max_size=self.config._connection.max_message_size,
                 )
             )
         except asyncio.CancelledError:

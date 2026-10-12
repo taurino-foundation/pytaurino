@@ -5,6 +5,7 @@ from .app_handle import AppHandle
 from .builder import Builder
 from .config import (
     Config,
+    ConfigBuilder,
     IpcConnectionConfig,
     IpcSecurity,
     MenuConfig,
@@ -23,6 +24,7 @@ __all__ = [
     "AppHandle",
     "Builder",
     "Config",
+    "ConfigBuilder",
     "IpcConnectionConfig",
     "IpcSecurity",
     "MenuConfig",

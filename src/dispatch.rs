@@ -17,7 +17,6 @@ pub fn dispatch(payload: &[u8]) -> Result<Vec<u8>> {
             if !arguments.is_empty() {
                 return response_error(request_id, 400, "engine.ping does not accept arguments");
             }
-
             response_ok(request_id, "pong")
         }
 
