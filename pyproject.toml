@@ -95,11 +95,12 @@ test = [
 # Maturin / PyO3
 # --------------------------------------------------
 
+
 [tool.maturin]
+manifest-path = "crates/taurino/Cargo.toml"
 bindings = "pyo3"
 module-name = "taurino.core._taurino"
 strip = true
-
 
 # --------------------------------------------------
 # Ruff

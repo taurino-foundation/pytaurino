@@ -1,0 +1,17 @@
+[package]
+name = "taurino"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "_taurino"
+crate-type = ["cdylib"]
+
+
+
+[dependencies]
+pyo3.workspace = true
+taurino-config.workspace = true
+[lints]
+workspace = true

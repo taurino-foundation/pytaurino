@@ -1,171 +1,45 @@
 use std::{
-    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
 };
-
-use anyhow::{Context, Result};
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
-use rmpv::Value as MsgPackValue;
-use serde_json::Value as JsonValue;
-use tao::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    platform::run_return::EventLoopExtRunReturn,
-    window::WindowBuilder,
-};
-use wry::{WebView, WebViewBuilder};
-
-pub mod client;
-pub mod config;
-pub mod dispatch;
-mod index;
-pub mod js_ipc;
-
-use crate::{
-    client::{IpcClient, IpcEvent},
-    config::Config,
-    dispatch::{
-        InvokeRequest, InvokeResponse, all_initialization_scripts, install_ipc_bridge,
-        resolve_invoke,
-    },
-    index::HTML,
+pub mod app;
+pub mod window;
+use {
+    pyo3::prelude::*,
+    taurino_config::{EngineLoopProxy, EventLoopMessage},
 };
 
-const MAIN_WEBVIEW_LABEL: &str = "webview-main";
-const COMMAND_METHOD: &str = "commands.invoke";
+fn spawn_shutdown_watcher(
+    shutdown_event: Py<PyAny>,
+    proxy: EngineLoopProxy,
+    running: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while running.load(Ordering::Acquire) {
+            // multiprocessing.Event.wait(timeout), in Python's spawned child.
+            let wait_result = Python::attach(|py| {
+                shutdown_event.call_method1(py, "wait", (0.1_f64,)).and_then(|result| result.extract::<bool>(py))
+            });
 
-type RpcResponse = (u16, i32, String, JsonValue);
-
-struct PendingInvoke {
-    webview_label: String,
-    request: InvokeRequest,
-}
-
-fn allocate_request_id(pending: &HashMap<u16, PendingInvoke>, next_id: &mut u16) -> Option<u16> {
-    for _ in 0..=u16::MAX {
-        let id = *next_id;
-        *next_id = next_id.wrapping_add(1);
-
-        if !pending.contains_key(&id) {
-            return Some(id);
-        }
-    }
-    None
-}
-
-pub enum EventLoopMessage {
-    JsInvoke {
-        webview_label: String,
-        request: InvokeRequest,
-    },
-    JsReply {
-        webview_label: String,
-        request: InvokeRequest,
-        response: std::result::Result<InvokeResponse, String>,
-    },
-    Shutdown,
-    IPC(IpcEvent),
-}
-
-fn reply_to_js(
-    webview: &WebView,
-    request: &InvokeRequest,
-    response: std::result::Result<InvokeResponse, String>,
-) {
-    if let Err(error) = resolve_invoke(webview, request, response) {
-        eprintln!("Taurino JS callback failed: {error:#}");
-    }
-}
-
-/// Called on Tao's GUI thread, never by the Tokio IPC worker.
-///
-/// IPC wire protocol:
-///   [method, payload]              = notification (Python -> JS)
-///   [id, method, arguments]        = RPC request (Python -> Rust)
-///   [id, status, message, data]    = RPC response (Python -> Rust)
-fn handle_ipc_message(
-    payload: &[u8],
-    webview: &WebView,
-    pending: &mut HashMap<u16, PendingInvoke>,
-    ipc_client: &IpcClient,
-) {
-    let envelope: MsgPackValue = match rmp_serde::from_slice(payload) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("Invalid MessagePack IPC payload: {error}");
-            return;
-        }
-    };
-
-    let MsgPackValue::Array(elements) = envelope else {
-        eprintln!("Invalid IPC envelope: expected MessagePack array");
-        return;
-    };
-
-    match elements.len() {
-        2 => {
-            // Fire-and-forget notification: Python -> Rust -> JavaScript.
-            // The handler in dispatch.rs calls WebView::evaluate_script,
-            // so it must execute on this GUI thread.
-            if !dispatch::try_handle_notification(payload, webview) {
-                eprintln!("Unsupported or malformed IPC notification");
-            }
-        }
-        3 => {
-            // Normal Python -> Rust RPC request. Keep RPC logic separate
-            // from the notification system and the JavaScript commands.
-            match dispatch::dispatch(payload) {
-                Ok(reply) => {
-                    // IpcClient::send queues bytes with try_send; no GUI blocking.
-                    if let Err(error) = ipc_client.send(reply) {
-                        eprintln!("Failed to queue IPC RPC response: {error:#}");
-                    }
+            match wait_result {
+                Ok(true) => {
+                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
+                    break;
                 }
+                Ok(false) => {}
                 Err(error) => {
-                    eprintln!("Invalid Python -> Rust RPC request: {error:#}");
+                    eprintln!("Shutdown watcher failed: {error}");
+                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
+                    break;
                 }
             }
         }
-        4 => {
-            // Response to a previous JS invoke forwarded to Python.
-            let (request_id, status, message, data): RpcResponse =
-                match rmp_serde::from_slice(payload) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        eprintln!("Invalid IPC RPC response: {error}");
-                        return;
-                    }
-                };
-
-            let Some(pending_request) = pending.remove(&request_id) else {
-                eprintln!("Unknown or expired RPC response ID: {request_id}");
-                return;
-            };
-
-            if pending_request.webview_label != MAIN_WEBVIEW_LABEL {
-                eprintln!("Unknown WebView: {}", pending_request.webview_label);
-                return;
-            }
-
-            let response = if status == 0 {
-                serde_json::from_value::<InvokeResponse>(data)
-                    .map_err(|error| format!("Invalid command response: {error}"))
-            } else {
-                Err(format!("RPC error {status}: {message}"))
-            };
-
-            reply_to_js(webview, &pending_request.request, response);
-        }
-        size => {
-            eprintln!("Invalid IPC envelope length: {size}");
-        }
-    }
+    })
 }
-
+/*
 /// Python starts this entry point in its separately spawned GUI process.
 #[pyfunction]
 fn runtime(
@@ -233,9 +107,7 @@ fn run_native(
         return Err(error.into());
     }
 
-    let mut pending = HashMap::<u16, PendingInvoke>::new();
-    let mut next_request_id = 0_u16;
-    let mut ipc_connected = true;
+
 
     let exit_code = event_loop.run_return(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -345,40 +217,10 @@ fn run_native(
         anyhow::bail!("Tao event loop exited with code {exit_code}");
     }
     Ok(())
-}
-
-fn spawn_shutdown_watcher(
-    shutdown_event: Py<PyAny>,
-    proxy: EventLoopProxy<EventLoopMessage>,
-    running: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        while running.load(Ordering::Acquire) {
-            // multiprocessing.Event.wait(timeout), in Python's spawned child.
-            let wait_result = Python::attach(|py| {
-                shutdown_event
-                    .call_method1(py, "wait", (0.1_f64,))
-                    .and_then(|result| result.extract::<bool>(py))
-            });
-
-            match wait_result {
-                Ok(true) => {
-                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
-                    break;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    eprintln!("Shutdown watcher failed: {error}");
-                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
-                    break;
-                }
-            }
-        }
-    })
-}
+} */
 
 #[pymodule]
 fn _taurino(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(runtime, module)?)?;
+    /* module.add_function(wrap_pyfunction!(runtime, module)?)?; */
     Ok(())
 }

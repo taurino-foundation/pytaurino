@@ -1,0 +1,43 @@
+[package]
+name = "taurino-config"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+uuid.workspace = true
+url.workspace = true
+dpi.workspace = true
+wry.workspace = true
+tao.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
+semver = "1"
+schemars = { version = "0.8.22", features = ["url", "uuid1"]}
+serde_with = "3"
+serde_bytes = "0.11.19"
+serde_repr = "0.1"
+serialize-to-javascript = { version = "0.1.2"}
+serde-untagged = "0.1"
+memchr = "2"
+ctor = { version = "1.0", default-features = false }
+infer = "0.22"
+dunce = "1"
+plist = "1"
+data-url = "0.3.2"
+mime = "0.3.17"
+mime_guess = "2.0.5"
+tempfile = "3.27.0"
+reqwest = "0.13.5"
+percent-encoding = "2"
+ctr = "0.10.1"
+ctrlc = "3.5.2"
+directories = "6.0.0"
+dirs="7.0.0"
+parking_lot = "0.12.5"
+
+
+[lints]
+workspace = true
