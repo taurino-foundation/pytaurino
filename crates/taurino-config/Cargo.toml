@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+parking_lot.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
 url.workspace = true
@@ -36,7 +37,6 @@ ctr = "0.10.1"
 ctrlc = "3.5.2"
 directories = "6.0.0"
 dirs="7.0.0"
-parking_lot = "0.12.5"
 
 
 [lints]

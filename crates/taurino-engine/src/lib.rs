@@ -12,6 +12,14 @@ use {
     taurino_config::{EngineLoopProxy, EventLoopMessage},
 };
 
+#[macro_export]
+macro_rules! unsafe_impl_sync_send {
+    ($type:ty) => {
+        unsafe impl Send for $type {}
+        unsafe impl Sync for $type {}
+    };
+}
+
 fn spawn_shutdown_watcher(
     shutdown_event: Py<PyAny>,
     proxy: EngineLoopProxy,

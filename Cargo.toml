@@ -19,6 +19,7 @@ members = [
 
 
 [workspace.dependencies]
+parking_lot = "0.12.5"
 taurino-aio = { path = "./crates/taurino-aio" }
 taurino-config = { path = "./crates/taurino-config" }
 taurino-core = { path = "./crates/taurino-core" }

@@ -1,26 +1,40 @@
 #[cfg(windows)]
+use taurino_config::{ArcMut, FocusState};
+#[cfg(windows)]
 use taurino_core::platforms::windows::apply_shadow_correction;
+#[cfg(any(target_os = "windows", target_os = "android"))]
+use wry::WebViewBuilderExtWindows;
 use {
-    crate::app::index::HTML,
-    anyhow::{Context, Result},
-    dpi::{PhysicalSize, Position},
-    tao::{monitor::MonitorHandle, window::Window},
+    crate::app::{index::HTML, manager::RuntimeManager},
+    anyhow::{Result, anyhow},
+    dpi::PhysicalSize,
+    std::{
+        collections::{
+            HashSet,
+            hash_map::Entry::{Occupied, Vacant},
+        },
+        sync::Arc,
+    },
     taurino_config::{
-        EngineLoopProxy, EngineWindowTarget,
+        EngineWindowTarget, WebContext, arc_mut,
         dispatcher::{all_initialization_scripts, install_ipc_bridge},
-        window::WindowConfig,
+        webview::{BackgroundThrottlingPolicy, WebViewConfig, WebViewId},
+        window::{WindowConfig, WindowId},
     },
     taurino_core::{
         platforms::{MonitorExt, util::calculate_window_center_position},
-        window::WindowBuilder,
+        webview::{WebViewManager, apply_build_webview, apply_webview_bounds},
+        window::{Window, WindowBuilder, find_monitor_for_position},
     },
-    wry::{WebView, WebViewBuilder},
+    wry::{WebContext as WryContext, WebViewBuilder},
 };
 pub fn create_window(
     event_loop: &EngineWindowTarget,
-    proxy: EngineLoopProxy,
+    manager: Arc<RuntimeManager>,
+    id: WindowId,
     window_options: &WindowConfig,
-) -> Result<(Window, WebView)> {
+) -> Result<Arc<Window>> {
+    let _proxy = manager.proxy.clone();
     let mut window_builder = WindowBuilder::with_config(window_options);
     if window_builder.prevent_overflow.is_some() || window_builder.center {
         let monitor = if let Some(window_position) = &window_builder.inner.window.position {
@@ -82,46 +96,215 @@ pub fn create_window(
                 window_builder.inner.window.fullscreen = Some(Fullscreen::Borderless(Some(target_monitor)));
             }
         }
-        #[cfg(windows)]
-        let _background_color = window_builder.inner.window.background_color;
-        #[cfg(windows)]
-        let _is_window_transparent = window_builder.inner.window.transparent;
-        #[cfg(target_os = "macos")]
-        {
-            if window_builder.tabbing_identifier.is_none()
-                || window_builder.inner.window.transparent
-                || !window_builder.inner.window.decorations
-            {
-                window_builder.inner = window_builder.inner.with_automatic_window_tabbing(false);
-            }
-        }
     };
-    let window = window_builder.inner.build(event_loop)?;
-    let mut builder = WebViewBuilder::new();
-    for script in all_initialization_scripts("main", "root", true, None)? {
-        builder = builder.with_initialization_script_for_main_only(script.script, script.for_main_frame_only);
+    #[cfg(windows)]
+    let background_color = window_builder.inner.window.background_color;
+    #[cfg(windows)]
+    let is_window_transparent = window_builder.inner.window.transparent;
+    #[cfg(target_os = "macos")]
+    {
+        if window_builder.tabbing_identifier.is_none()
+            || window_builder.inner.window.transparent
+            || !window_builder.inner.window.decorations
+        {
+            window_builder.inner = window_builder.inner.with_automatic_window_tabbing(false);
+        }
     }
+    let window = window_builder.inner.build(event_loop)?;
 
-    builder = install_ipc_bridge(builder, "root".to_owned(), proxy);
-    let webview = builder.with_html(HTML).build(&window).context("Failed to create WebView")?;
-
-    Ok((window, webview))
+    // On macOS, `with_position` uses the content origin; the title bar is added
+    // above it. `set_outer_position` is needed for precise window placement.
+    #[cfg(target_os = "macos")]
+    if !is_fullscreen {
+        if let Some(position) = initial_position {
+            window.set_outer_position(position);
+        }
+    }
+    #[cfg(windows)]
+    let focused_webview = arc_mut(FocusState::default());
+    let mut webviews_manager = WebViewManager::new()?;
+    let window_id = arc_mut(id);
+    let has_children = window_options.webviews.len() > 1;
+    for view_options in &window_options.webviews {
+        let mut view_options = view_options.clone();
+        // If only a single WebView exists in the list and the user has still set
+        // `child` to `true`, we must ensure that it is reset to `false`, because
+        // a single WebView in the list cannot be a child WebView of a window.
+        if !has_children {
+            view_options.child = false;
+        }
+        attach_webview(
+            &mut webviews_manager,
+            &window,
+            &view_options,
+            window_options,
+            manager.clone(),
+            window_id.clone(),
+            #[cfg(windows)]
+            focused_webview.clone(),
+        )?;
+    }
+    Ok(Window::new(
+        window,
+        id,
+        window_options.label.clone(),
+        #[cfg(windows)]
+        background_color,
+        #[cfg(windows)]
+        is_window_transparent,
+        #[cfg(windows)]
+        focused_webview,
+        has_children,
+        webviews_manager,
+    ))
 }
 
-pub fn find_monitor_for_position(
-    monitors: impl Iterator<Item = MonitorHandle>,
-    window_position: Position,
-) -> Option<MonitorHandle> {
-    monitors.into_iter().find(|m| {
-        let monitor_pos = m.position();
-        let monitor_size = m.size();
+pub(crate) fn create_webview(
+    manager: Arc<RuntimeManager>,
+    window_id: ArcMut<WindowId>,
+    id: WebViewId,
+    options: &WebViewConfig,
+    window_options: &WindowConfig,
+    window: &tao::window::Window,
+    #[cfg(windows)] focused_webview: ArcMut<FocusState>,
+) -> Result<taurino_core::webview::WebView> {
+    let window_label = window_options.label.clone();
+    let webview_label = options.label.clone();
+    let child = options.child;
+    let all_initialization_scripts =
+        all_initialization_scripts(&window_label, &webview_label, options.use_https_scheme, None)?;
+    let config = manager.config()?;
+    let proxy = manager.proxy.clone();
+    let mut web_context = config.context.lock().expect("poisoned WebContext store");
+    let web_context_key =
+        config.prepare_webview_data_directory(&window_options.label, options.data_directory.clone())?;
 
-        // type annotations required for 32bit targets.
-        let window_position = window_position.to_physical::<i32>(m.scale_factor());
+    let is_first_context = web_context.is_empty();
+    // the context must be stored on the HashMap because it must outlive the WebView on macOS
+    let automation_enabled = std::env::var("TAURINO_WEBVIEW_AUTOMATION").as_deref() == Ok("true");
+    let entry = web_context.entry(web_context_key.clone());
+    let web_context = match entry {
+        Occupied(occupied) => {
+            let occupied = occupied.into_mut();
+            occupied.referenced_by_webviews.insert(webview_label.clone());
+            occupied
+        }
+        Vacant(vacant) => {
+            let mut web_context = WryContext::new(web_context_key.clone());
+            web_context.set_allows_automation(if automation_enabled { is_first_context } else { false });
+            vacant.insert(WebContext {
+                inner: web_context,
+                referenced_by_webviews: [webview_label.clone()].into(),
+                registered_custom_protocols: HashSet::new(),
+            })
+        }
+    };
+    let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context.inner)
+        .with_id(&webview_label)
+        .with_focused(window_options.focus)
+        .with_transparent(window_options.transparent)
+        .with_accept_first_mouse(window_options.accept_first_mouse)
+        .with_incognito(options.incognito)
+        .with_clipboard(options.enable_clipboard_access)
+        .with_hotkeys_zoom(options.zoom_hotkeys_enabled)
+        .with_general_autofill_enabled(options.general_autofill_enabled);
 
-        monitor_pos.x <= window_position.x
-            && window_position.x < monitor_pos.x + monitor_size.width as i32
-            && monitor_pos.y <= window_position.y
-            && window_position.y < monitor_pos.y + monitor_size.height as i32
-    })
+    #[cfg(target_os = "macos")]
+    if let Some(webview_configuration) = options.webview_configuration {
+        webview_builder = webview_builder.with_webview_configuration(webview_configuration);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        webview_builder = webview_builder.with_https_scheme(options.use_https_scheme);
+    }
+    let (webview_bounds, mut webview_builder) =
+        apply_webview_bounds(window, webview_builder, options.bounds, options.auto_resize, child);
+    if let Some(background_throttling) = options.background_throttling.as_ref() {
+        webview_builder = webview_builder.with_background_throttling(match background_throttling {
+            BackgroundThrottlingPolicy::Disabled => wry::BackgroundThrottlingPolicy::Disabled,
+            BackgroundThrottlingPolicy::Suspend => wry::BackgroundThrottlingPolicy::Suspend,
+            BackgroundThrottlingPolicy::Throttle => wry::BackgroundThrottlingPolicy::Throttle,
+        });
+    }
+    webview_builder = install_ipc_bridge(webview_builder, webview_label.clone(), proxy.clone());
+    webview_builder = webview_builder.with_html(HTML);
+    if options.javascript_disabled {
+        webview_builder = webview_builder.with_javascript_disabled();
+    }
+    if let Some(color) = window_options.background_color {
+        webview_builder = webview_builder.with_background_color(color.into());
+    }
+    for initialization_script in all_initialization_scripts {
+        webview_builder = if initialization_script.for_main_frame_only {
+            webview_builder.with_initialization_script_for_main_only(initialization_script.script, true)
+        } else {
+            webview_builder.with_initialization_script(initialization_script.script)
+        };
+    }
+    let webview = apply_build_webview(window, webview_builder, &options.label, child)?;
+    // webview.evaluate_script("console.log(window.__TAURINO_INTERNALS__)")?;
+    let webview = taurino_core::webview::WebView::new(
+        id,
+        webview_label,
+        window_id,
+        focused_webview,
+        webview,
+        if automation_enabled { None } else { web_context_key },
+        config.context.clone(),
+        arc_mut(webview_bounds),
+        proxy,
+    );
+    Ok(webview)
+}
+
+// =========================================================================
+// Creation
+// =========================================================================
+
+/// Creates and registers a new WebView.
+///
+/// The WebView is inserted only after its native creation succeeds.
+///
+/// # Errors
+///
+/// Returns an error if:
+///
+/// - another WebView already uses the requested label,
+/// - the generated WebView ID is already registered,
+/// - native WebView creation fails.
+pub fn attach_webview(
+    webview_manager: &mut WebViewManager,
+    window: &tao::window::Window,
+    options: &WebViewConfig,
+    window_options: &WindowConfig,
+    manager: Arc<RuntimeManager>,
+    window_id: ArcMut<WindowId>,
+    #[cfg(windows)] focused_webview: ArcMut<FocusState>,
+) -> Result<WebViewId> {
+    if webview_manager.contains_label(&options.label) {
+        return Err(anyhow!("WebView with label {:?} is already registered", options.label));
+    }
+
+    let id = webview_manager.next_webview_id();
+
+    if webview_manager.contains(id) {
+        return Err(anyhow!("WebView with id {:?} is already registered", id));
+    }
+
+    let webview = create_webview(
+        manager,
+        window_id,
+        id,
+        options,
+        window_options,
+        window,
+        #[cfg(windows)]
+        focused_webview,
+    )
+    .map_err(|error| anyhow!("failed to create WebView {:?}: {error}", options.label))?;
+
+    webview_manager.insert(webview)?;
+
+    Ok(id)
 }

@@ -2,7 +2,7 @@ use {
     anyhow::{Context, Result},
     pyo3::{exceptions::PyRuntimeError, prelude::*},
     std::sync::OnceLock,
-    taurino_engine::app::Taurino,
+    taurino_engine::app::Runtime,
 };
 
 pub fn get_taurino_version() -> &'static str {
@@ -15,9 +15,9 @@ pub fn get_taurino_version() -> &'static str {
 }
 
 fn run_runtime(config: Vec<u8>, shutdown_event: Py<PyAny>, notify_ready: Py<PyAny>) -> Result<()> {
-    let app = Taurino::new(config, shutdown_event, notify_ready).context("Failed to initialize Taurino")?;
+    let app = Runtime::new(config, shutdown_event, notify_ready).context("Failed to initialize Taurino Runtime")?;
 
-    app.run().context("Taurino runtime failed")
+    app.run().context("Taurino  runtime failed")
 }
 
 #[pyfunction]

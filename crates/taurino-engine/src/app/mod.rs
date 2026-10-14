@@ -1,20 +1,13 @@
 pub mod handler;
 pub mod index;
 use {
-    anyhow::ensure,
-    std::thread::JoinHandle,
-    tao::{
-        platform::run_return::EventLoopExtRunReturn,
-        window::{Window, WindowId},
-    },
-    wry::WebView,
+    std::thread::JoinHandle, tao::platform::run_return::EventLoopExtRunReturn, taurino_config::utils::DeviceRegistry,
 };
 pub mod manager;
 use {
     crate::{
-        app::{handler::EventHandler, manager::Manager},
+        app::{handler::EventHandler, manager::RuntimeManager},
         spawn_shutdown_watcher,
-        window::factory::create_window,
     },
     anyhow::Result,
     pyo3::{Py, PyAny, Python},
@@ -31,28 +24,23 @@ use {
     },
 };
 
-/// Native windows owned by the GUI event handler.
-///
-/// Each entry stores the WebView before its parent Window so that
-/// the WebView is dropped first during normal destruction.
-pub type NativeWindows = HashMap<WindowId, (WebView, Window)>;
-
 #[allow(dead_code)]
-pub struct Taurino {
+pub struct Runtime {
     ipc_connection: IpcClient,
     event_loop: EngineLoop,
-    manager: Arc<Manager>,
+    manager: Arc<RuntimeManager>,
     watcher_running: Arc<AtomicBool>,
     watcher: JoinHandle<()>,
 }
 
-impl Taurino {
+impl Runtime {
     pub fn new(config_bytes: Vec<u8>, shutdown_event: Py<PyAny>, notify_ready: Py<PyAny>) -> Result<Self> {
+        let device_registry = DeviceRegistry::new()?;
         let config = Config::new(config_bytes)?;
         let context_manager = WebContextStore::default();
         // Tao's event loop must be created and run on the GUI process main thread.
         let mut loop_builder = EngineLoopBuilder::with_user_event();
-        let event_loop = loop_builder.build();
+        let mut event_loop = loop_builder.build();
 
         let ipc_proxy = event_loop.create_proxy();
 
@@ -72,44 +60,21 @@ impl Taurino {
             return Err(error.into());
         }
 
-        let manager = Manager::new(config, context_manager, ipc_connection.clone());
+        let manager =
+            RuntimeManager::new(config, context_manager, device_registry, ipc_connection.clone(), &mut event_loop)?;
         Ok(Self { ipc_connection, event_loop, manager, watcher_running, watcher })
     }
 
     pub fn run(self) -> Result<()> {
         // Clone the manager because ownership of `self.manager` will later be
         // transferred into EngineEventHandler.
-        let mut value: Option<(Window, WebView)> = None;
         let manager = self.manager.clone();
         let config = manager.config()?;
         let target = &self.event_loop;
 
         // application lifecycle behavior for incoming Tao events.
 
-        // ---------------------------------------------------------
-        // Create native windows and WebViews
-        // ---------------------------------------------------------
-
-        let windows: NativeWindows = {
-            let config = manager.config()?;
-            let window_configs = &config.app_config().windows;
-            let proxy = self.event_loop.create_proxy();
-            let mut windows = HashMap::with_capacity(window_configs.len());
-
-            for window_config in window_configs {
-                let (window, webview) = create_window(target, proxy.clone(), window_config)?;
-
-                let window_id = window.id();
-
-                windows.insert(window_id, (webview, window));
-            }
-
-            windows
-        };
-
-        ensure!(!windows.is_empty(), "No application windows configured");
-
-        let mut event_handler = EventHandler::new(self.manager, windows);
+        let mut event_handler = EventHandler::new(self.manager);
 
         // ---------------------------------------------------------------------
         // Enter GUI event loop
@@ -118,15 +83,15 @@ impl Taurino {
         // From this point onward, application lifecycle changes should normally
         // be driven by events rather than by direct calls from external threads.
 
-        let mut pending = HashMap::<u16, PendingInvoke>::new();
+        /*         let mut pending = HashMap::<u16, PendingInvoke>::new();
         let mut next_request_id = 0_u16;
-        let mut ipc_connected = true;
+        let mut ipc_connected = true; */
         let mut main_loop = self.event_loop;
         let exit_code = main_loop.run_return(move |event, target, control_flow| {
             event_handler.handle_event(
-                &mut pending,
+                /*                 &mut pending,
                 &mut next_request_id,
-                &mut ipc_connected,
+                &mut ipc_connected, */
                 event,
                 target,
                 control_flow,

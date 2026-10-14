@@ -3,6 +3,7 @@ use {
     dpi::{Position, Size},
     serde::{Deserialize, Deserializer, Serialize, Serializer},
     std::{
+        collections::{HashMap, HashSet},
         fmt::{self, Display, Formatter},
         path::PathBuf,
         pin::Pin,
@@ -42,6 +43,18 @@ pub mod window;
 pub mod webview;
 pub mod dispatcher;
 pub mod protocol;
+pub use wry::WebContext as WryContext;
+#[derive(Debug)]
+pub struct WebContext {
+    pub inner: WryContext,
+    pub referenced_by_webviews: HashSet<String>,
+    // on Linux the custom protocols are associated with the context
+    // and you cannot register a URI scheme more than once
+    pub registered_custom_protocols: HashSet<String>,
+}
+
+pub type WebContextStore = Arc<Mutex<HashMap<Option<PathBuf>, WebContext>>>;
+
 pub type EngineLoop = EventLoop<EventLoopMessage>;
 pub type EngineLoopBuilder = EventLoopBuilder<EventLoopMessage>;
 pub type EngineLoopProxy = EventLoopProxy<EventLoopMessage>;
@@ -441,6 +454,7 @@ pub struct Config {
     pub temp_dir: PathBuf,
     pub current_exe: PathBuf,
     pub connection: IpcClientConfig,
+    pub context: WebContextStore,
 }
 impl Config {
     /// Decode MessagePack and initialize application paths.
@@ -451,6 +465,7 @@ impl Config {
     /// Create a resolved runtime configuration.
     pub fn from_app_config(app: AppConfig) -> Result<Self> {
         app.validate()?;
+        let context = WebContextStore::default();
         let raw_config = app.clone();
         let uuid = app.app_id;
         let product_name = app.product_name.unwrap_or_else(|| format!("taurino-{}", uuid));
@@ -483,6 +498,7 @@ impl Config {
             cache_dir,
             temp_dir,
             current_exe,
+            context,
         })
     }
     /// Persistent WebView user data directory.

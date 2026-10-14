@@ -69,7 +69,10 @@ use {
         fmt,
         sync::atomic::{AtomicBool, Ordering},
     },
-    tao::window::{Fullscreen, Theme as TaoTheme, Window as TaoWindow, WindowBuilder as TaoWindowBuilder},
+    tao::{
+        monitor::MonitorHandle,
+        window::{Fullscreen, Theme as TaoTheme, Window as TaoWindow, WindowBuilder as TaoWindowBuilder},
+    },
     taurino_config::{
         Color, Theme,
         utils::lock_state,
@@ -1649,6 +1652,25 @@ pub struct GtkWindow(pub gtk::ApplicationWindow);
 ))]
 
 pub struct GtkBox(pub gtk::Box);
+
+pub fn find_monitor_for_position(
+    monitors: impl Iterator<Item = MonitorHandle>,
+    window_position: Position,
+) -> Option<MonitorHandle> {
+    monitors.into_iter().find(|m| {
+        let monitor_pos = m.position();
+        let monitor_size = m.size();
+
+        // type annotations required for 32bit targets.
+        let window_position = window_position.to_physical::<i32>(m.scale_factor());
+
+        monitor_pos.x <= window_position.x
+            && window_position.x < monitor_pos.x + monitor_size.width as i32
+            && monitor_pos.y <= window_position.y
+            && window_position.y < monitor_pos.y + monitor_size.height as i32
+    })
+}
+
 /*
 // -----------------------------------------------------------------------------
 

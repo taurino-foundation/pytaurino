@@ -1,7 +1,13 @@
 #[cfg(windows)]
+use crate::platforms::windows::register_webview_events;
+#[cfg(windows)]
+use tao::platform::windows::WindowExtWindows;
+#[cfg(windows)]
 use taurino_config::{ArcMut, FocusState};
 use {
+    crate::wrappers::RectWrapper,
     anyhow::{Result, anyhow},
+    dpi::LogicalPosition,
     std::{
         collections::HashMap,
         ops::Deref,
@@ -12,13 +18,14 @@ use {
             atomic::{AtomicU32, Ordering},
         },
     },
+    tao::window::Window,
     taurino_config::{
-        EngineLoopProxy,
-        webview::{WebContextStore, WebViewId, WebviewBounds},
+        EngineLoopProxy, Rect, WebContextStore,
+        webview::{WebViewId, WebviewBounds},
         window::WindowId,
     },
+    wry::WebViewBuilder,
 };
-
 pub struct WebView {
     pub(crate) label: String,
     id: WebViewId,
@@ -48,15 +55,8 @@ impl WebView {
         bounds: Arc<Mutex<Option<WebviewBounds>>>,
         proxy: EngineLoopProxy,
     ) -> Self {
-        /*         #[cfg(windows)]
-        register_webview_events(
-            window_id.clone(),
-            webview_id,
-            webview_label.clone(),
-            focused_webview,
-            &webview,
-            proxy,
-        ); */
+        #[cfg(windows)]
+        register_webview_events(window_id.clone(), webview_id, webview_label.clone(), focused_webview, &webview, proxy);
 
         #[cfg(not(windows))]
         let _ = proxy;
@@ -427,4 +427,103 @@ impl WebViewManager {
         self.id_index.clear();
         self.label_index.clear();
     }
+}
+
+pub fn apply_build_webview<'a>(
+    window: &Window,
+    webview_builder: wry::WebViewBuilder<'a>,
+    webview_label: &str,
+    child: bool,
+) -> Result<wry::WebView> {
+    let webview = match child {
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios", target_os = "android")))]
+        true => {
+            let vbox = window.default_vbox().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to create child WebView `{}`: \
+                     window does not provide a GTK default vbox",
+                    webview_label
+                )
+            })?;
+            webview_builder.build_gtk(vbox)
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "ios", target_os = "android"))]
+        true => webview_builder.build_as_child(window),
+        false => {
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "ios", target_os = "android"))]
+            let builder = webview_builder.build(window);
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios", target_os = "android")))]
+            let builder = {
+                let vbox = window.default_vbox().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to create WebView `{}`: \
+                         window does not provide a GTK default vbox",
+                        webview_label
+                    )
+                })?;
+                webview_builder.build_gtk(vbox)
+            };
+            builder
+        }
+    }
+    .map_err(|error| anyhow::anyhow!("failed to build WebView `{}`: {error}", webview_label))?;
+    if !child {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        crate::platforms::undecorated_resizing::attach_resize_handler(&webview);
+
+        #[cfg(windows)]
+        if window.is_resizable() && !window.is_decorated() {
+            crate::platforms::undecorated_resizing::attach_resize_handler(
+                window.hwnd(),
+                window.has_undecorated_shadow(),
+            );
+        }
+    }
+
+    Ok(webview)
+}
+
+pub fn apply_webview_bounds<'a>(
+    window: &'a Window,
+    mut webview_builder: WebViewBuilder<'a>,
+    bounds: Option<Rect>,
+    auto_resize: bool,
+    child: bool,
+) -> (Option<WebviewBounds>, WebViewBuilder<'a>) {
+    let webview_bounds = if let Some(bounds) = bounds {
+        let bounds: RectWrapper = bounds.into();
+        let bounds = bounds.0;
+        let scale_factor = window.scale_factor();
+        let position = bounds.position.to_logical::<f32>(scale_factor);
+        let size = bounds.size.to_logical::<f32>(scale_factor);
+        webview_builder = webview_builder.with_bounds(bounds);
+        let window_size = window.inner_size().to_logical::<f32>(scale_factor);
+        if auto_resize {
+            Some(WebviewBounds {
+                x_rate: position.x / window_size.width,
+                y_rate: position.y / window_size.height,
+                width_rate: size.width / window_size.width,
+                height_rate: size.height / window_size.height,
+            })
+        } else {
+            None
+        }
+    } else {
+        if child {
+            webview_builder = webview_builder.with_bounds(wry::Rect {
+                position: LogicalPosition::new(0, 0).into(),
+                size: window.inner_size().into(),
+            });
+            Some(WebviewBounds { x_rate: 0., y_rate: 0., width_rate: 1., height_rate: 1. })
+        } else {
+            None
+        }
+    };
+    (webview_bounds, webview_builder)
 }

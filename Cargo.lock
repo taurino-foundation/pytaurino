@@ -4838,6 +4838,7 @@ dependencies = [
  "os_info",
  "raw-window-handle",
  "security-framework",
+ "serde",
  "serde_json",
  "softbuffer",
  "tao",
