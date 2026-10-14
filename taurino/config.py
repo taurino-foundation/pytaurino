@@ -1,472 +1,392 @@
-"""Validated Pydantic configuration and safe Rust bootstrap serialization."""
+"""Fully typed fluent builders for the existing Taurino Pydantic v2 config models.
+
+Each configuration field has an explicit builder method. Nested builders can be
+passed directly to app/window collections; `build()` validates with Pydantic.
+"""
 
 from __future__ import annotations
 
-from enum import StrEnum
-from pathlib import Path
-from typing import Any, cast
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from copy import deepcopy
+from typing import Any, Generic, Self, TypeAlias, TypeVar
+from uuid import UUID
 
-import msgpack
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel
+
+from .proto import (
+    AppConfig,
+    BackgroundThrottlingPolicy,
+    Color,
+    IpcClientConfig,
+    MenuConfig,
+    NavigationPolicy,
+    NewWindowPolicy,
+    PermissionRequestPolicy,
+    PreventOverflowConfig,
+    ScrollBarStyle,
+    ShortcutConfig,
+    Theme,
+    TitleBarStyle,
+    TrayIconConfig,
+    WebContentProcessTerminatePolicy,
+    WebViewConfig,
+    WindowConfig,
+    WindowEffectsConfig,
+)
+
+T = TypeVar("T", bound=BaseModel)
+
+# Pydantic validates the exact 16 U8 channels at build time.
+DataStoreIdentifier: TypeAlias = tuple[int, ...]
+# WindowConfig normalizes several color inputs with parse_color.
+ColorInput: TypeAlias = Color | str | list[int] | dict[str, int]
 
 
-def to_camel(name: str) -> str:
-    parts = name.split("_")
-    return parts[0] + "".join(p.title() for p in parts[1:])
+class ConfigBuilder(Generic[T]):
+    """Mutable fluent builder. `build()` returns an independent validated model."""
 
+    model_type: type[T]
 
-class FrozenConfig(BaseModel):
-    model_config = ConfigDict(
-        frozen=True, populate_by_name=True, alias_generator=to_camel, extra="forbid"
-    )
+    def __init__(self, **values: Any) -> None:
+        self._values: dict[str, Any] = deepcopy(values)
 
-
-class WindowPosition(StrEnum):
-    CENTER = "center"
-    DEFAULT = "default"
-
-
-class MenuItemType(StrEnum):
-    ITEM = "item"
-    SEPARATOR = "separator"
-    SUBMENU = "submenu"
-
-
-class IpcSecurity(StrEnum):
-    NONE = "none"
-    AUTHENTICATED = "authenticated"
-
-
-class IpcConnectionConfig(FrozenConfig):
-    endpoint: str = Field(default_factory=lambda: f"taurino-{uuid4().hex}", min_length=1)
-    connect_timeout: float = Field(default=10.0, gt=0)
-    operation_timeout: float = Field(default=30.0, gt=0)
-    handshake_timeout: float = Field(default=10.0, gt=0)
-    max_message_size: int = Field(default=1024 * 1024, ge=1024, le=64 * 1024 * 1024)
-    max_clients: int = Field(default=1, ge=1, le=256)
-    permissions: int | str | None = None
-    security: IpcSecurity = IpcSecurity.NONE
-    server_private_key_path: Path | None = None
-    client_public_key: bytes | None = None
-    client_private_key_path: Path | None = None
-
-    @model_validator(mode="after")
-    def ensure_security(self) -> IpcConnectionConfig:
-        if not self.endpoint.strip():
-            raise ValueError("endpoint must not be blank")
-        if self.security == IpcSecurity.AUTHENTICATED:
-            if (
-                not self.server_private_key_path
-                or not self.client_private_key_path
-                or self.client_public_key is None
-            ):
-                raise ValueError(
-                    "authenticated IPC needs both identity key paths and the pinned client public key"
-                )
-            if len(self.client_public_key) != 32:
-                raise ValueError("client_public_key must contain 32 raw Ed25519 public-key bytes")
+    def _set(self, name: str, value: Any) -> Self:
+        if name not in self.model_type.model_fields:
+            raise ValueError(f"Unknown configuration field: {name!r}")
+        self._values[name] = deepcopy(value)
         return self
 
-    def to_client_bootstrap(self) -> dict[str, Any]:
-        """Never expose the Python server private key in the engine config."""
-        out: dict[str, Any] = {
-            "endpoint": self.endpoint,
-            "connectTimeout": self.connect_timeout,
-            "operationTimeout": self.operation_timeout,
-            "handshakeTimeout": self.handshake_timeout,
-            "maxMessageSize": self.max_message_size,
-            "security": self.security.value,
-        }
-        if self.security == IpcSecurity.AUTHENTICATED:
-            from taunicorn.security import identity_public_key
-
-            assert self.server_private_key_path is not None
-            assert self.client_private_key_path is not None
-            server_private = self.server_private_key_path.read_bytes()
-            if len(server_private) != 32:
-                raise ValueError("server Ed25519 private key must be exactly 32 bytes")
-            out["serverPublicKey"] = identity_public_key(server_private)
-            out["clientPrivateKeyPath"] = str(self.client_private_key_path)
-        return out
-
-
-class WebViewConfig(FrozenConfig):
-    url: str
-    label: str = Field(min_length=1)
-    x: int = 0
-    y: int = 0
-    width: int | None = Field(default=None, gt=0)
-    height: int | None = Field(default=None, gt=0)
-    visible: bool = True
-    devtools: bool = False
-
-
-class WindowConfig(FrozenConfig):
-    label: str = Field(min_length=1)
-    center: bool = True
-    title: str = "Taurino"
-    width: int = Field(default=1000, gt=0)
-    height: int = Field(default=700, gt=0)
-    min_width: int | None = Field(default=None, gt=0)
-    min_height: int | None = Field(default=None, gt=0)
-    resizable: bool = True
-    decorations: bool = True
-    transparent: bool = False
-    visible: bool = True
-    fullscreen: bool = False
-    maximized: bool = False
-    webviews: tuple[WebViewConfig, ...] = ()
-
-
-class ShortcutConfig(FrozenConfig):
-    accelerator: str
-    action: str
-    enabled: bool = True
-
-
-class MenuItemConfig(FrozenConfig):
-    id: str
-    text: str = ""
-    kind: MenuItemType = MenuItemType.ITEM
-    enabled: bool = True
-    accelerator: str | None = None
-    children: tuple[MenuItemConfig, ...] = ()
-
-
-class MenuConfig(FrozenConfig):
-    items: tuple[MenuItemConfig, ...] = ()
-
-
-class TrayIconConfig(FrozenConfig):
-    id: str
-    icon: str | None = None
-    tooltip: str | None = None
-    visible: bool = True
-    menu: MenuConfig | None = None
-
-
-class Config(FrozenConfig):
-    productname: str = Field(min_length=1)
-    version: str = Field(min_length=1)
-    app_id: UUID
-    connection: IpcConnectionConfig = Field(default_factory=IpcConnectionConfig, exclude=True)
-    windows: tuple[WindowConfig, ...] = ()
-    shortcuts: tuple[ShortcutConfig, ...] = ()
-    trays: tuple[TrayIconConfig, ...] = ()
-    app_menu: MenuConfig | None = None
-    schema_version: int = Field(default=1, ge=1, le=1)
-
-    @field_validator("productname", "version")
-    @classmethod
-    def non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must not be blank")
-        return value
-
-    @model_validator(mode="after")
-    def unique_labels(self) -> Config:
-        win_labels = [w.label for w in self.windows]
-        view_labels = [v.label for w in self.windows for v in w.webviews]
-        if len(set(win_labels)) != len(win_labels):
-            raise ValueError("Duplicate window labels")
-        if len(set(view_labels)) != len(view_labels):
-            raise ValueError("Duplicate WebView labels")
+    def set(self, **values: Any) -> Self:
+        """Escape hatch for model fields; named methods offer better type checking."""
+        unknown = set(values).difference(self.model_type.model_fields)
+        if unknown:
+            raise ValueError(f"Unknown configuration field(s): {sorted(unknown)}")
+        self._values.update(deepcopy(values))
         return self
 
-    def to_engine_bytes(self) -> bytes:
-        """Serialize actual app config plus the *client-only* IPC bootstrap using MessagePack.
-
-        Rust must use a compatible serde naming scheme and this versioned schema.
-        No server-side private identity key is transferred.
-        """
-        data = self.model_dump(mode="json", by_alias=True)
-        data["connection"] = self.connection.to_client_bootstrap()
-
-        return cast(bytes, msgpack.packb(data, use_bin_type=True))
+    def build(self) -> T:
+        """Build a fresh model and run every Pydantic field/model validator."""
+        return self.model_type.model_validate(deepcopy(self._values))
 
 
-class ConfigBuilder:
-    """Fluent builder for validated Taurino runtime configuration."""
+class WebViewBuilder(ConfigBuilder[WebViewConfig]):
+    """Fluent builder for WebViewConfig."""
 
-    __slots__ = (
-        "_app_id",
-        "_app_menu",
-        "_connection",
-        "_productname",
-        "_shortcuts",
-        "_trays",
-        "_version",
-        "_windows",
-    )
+    model_type = WebViewConfig
+
+    def __init__(self, label: str = "root") -> None:
+        super().__init__(label=label)
+
+    def label(self, value: str) -> Self:
+        return self._set("label", value)
+
+    def child(self, value: bool = True) -> Self:
+        return self._set("child", value)
+
+    def auto_resize(self, value: bool = True) -> Self:
+        return self._set("auto_resize", value)
+
+    def url(self, value: str) -> Self:
+        return self._set("url", value)
+
+    def user_agent(self, value: str) -> Self:
+        return self._set("user_agent", value)
+
+    def drag_drop_enabled(self, value: bool = True) -> Self:
+        return self._set("drag_drop_enabled", value)
+
+    def additional_browser_args(self, value: str) -> Self:
+        return self._set("additional_browser_args", value)
+
+    def incognito(self, value: bool = True) -> Self:
+        return self._set("incognito", value)
+
+    def proxy_url(self, value: str) -> Self:
+        return self._set("proxy_url", value)
+
+    def zoom_hotkeys_enabled(self, value: bool = True) -> Self:
+        return self._set("zoom_hotkeys_enabled", value)
+
+    def browser_extensions_enabled(self, value: bool = True) -> Self:
+        return self._set("browser_extensions_enabled", value)
+
+    def use_https_scheme(self, value: bool = True) -> Self:
+        return self._set("use_https_scheme", value)
+
+    def devtools(self, value: bool) -> Self:
+        return self._set("devtools", value)
+
+    def background_throttling(self, value: BackgroundThrottlingPolicy) -> Self:
+        return self._set("background_throttling", value)
+
+    def javascript_disabled(self, value: bool = True) -> Self:
+        return self._set("javascript_disabled", value)
+
+    def allow_link_preview(self, value: bool = True) -> Self:
+        return self._set("allow_link_preview", value)
+
+    def disable_input_accessory_view(self, value: bool = True) -> Self:
+        return self._set("disable_input_accessory_view", value)
+
+    def data_directory(self, value: str) -> Self:
+        return self._set("data_directory", value)
+
+    def data_store_identifier(self, value: DataStoreIdentifier) -> Self:
+        return self._set("data_store_identifier", value)
+
+    def scroll_bar_style(self, value: ScrollBarStyle) -> Self:
+        return self._set("scroll_bar_style", value)
+
+    def limit_navigations_to_app_bound_domains(self, value: bool = True) -> Self:
+        return self._set("limit_navigations_to_app_bound_domains", value)
+
+    def activity_name(self, value: str) -> Self:
+        return self._set("activity_name", value)
+
+    def created_by_activity_name(self, value: str) -> Self:
+        return self._set("created_by_activity_name", value)
+
+    def requested_by_scene_identifier(self, value: str) -> Self:
+        return self._set("requested_by_scene_identifier", value)
+
+    def general_autofill_enabled(self, value: bool = True) -> Self:
+        return self._set("general_autofill_enabled", value)
+
+    def enable_clipboard_access(self, value: bool = True) -> Self:
+        return self._set("enable_clipboard_access", value)
+
+    def navigation_policy(self, value: NavigationPolicy) -> Self:
+        return self._set("navigation_policy", value)
+
+    def new_window_policy(self, value: NewWindowPolicy) -> Self:
+        return self._set("new_window_policy", value)
+
+    def permission_request_policy(self, value: PermissionRequestPolicy) -> Self:
+        return self._set("permission_request_policy", value)
+
+    def web_content_process_terminate_policy(self, value: WebContentProcessTerminatePolicy) -> Self:
+        return self._set("web_content_process_terminate_policy", value)
+
+    def bounds(self, value: dict[str, Any]) -> Self:
+        return self._set("bounds", value)
+
+
+class WindowBuilder(ConfigBuilder[WindowConfig]):
+    """Fluent builder for WindowConfig."""
+
+    model_type = WindowConfig
+
+    def __init__(self, label: str = "main") -> None:
+        super().__init__(label=label, webviews=[])
+
+    def label(self, value: str) -> Self:
+        return self._set("label", value)
+
+    def create(self, value: bool = True) -> Self:
+        return self._set("create", value)
+
+    def x(self, value: float) -> Self:
+        return self._set("x", value)
+
+    def y(self, value: float) -> Self:
+        return self._set("y", value)
+
+    def webview(self, value: WebViewConfig | WebViewBuilder) -> Self:
+        config = value.build() if isinstance(value, WebViewBuilder) else value
+        self._values["webviews"].append(config.model_copy(deep=True))
+        return self
+
+    def webviews(self, *values: WebViewConfig | WebViewBuilder) -> Self:
+        """Append one or more WebViews."""
+        for value in values:
+            self.webview(value)
+        return self
+
+    def center(self, value: bool = True) -> Self:
+        return self._set("center", value)
+
+    def width(self, value: float) -> Self:
+        return self._set("width", value)
+
+    def height(self, value: float) -> Self:
+        return self._set("height", value)
+
+    def size(self, width: float, height: float) -> Self:
+        return self.set(width=width, height=height)
+
+    def position(self, x: float, y: float) -> Self:
+        return self.set(x=x, y=y)
+
+    def min_size(self, width: float | None, height: float | None) -> Self:
+        return self.set(min_width=width, min_height=height)
+
+    def max_size(self, width: float | None, height: float | None) -> Self:
+        return self.set(max_width=width, max_height=height)
+
+    def min_width(self, value: float) -> Self:
+        return self._set("min_width", value)
+
+    def min_height(self, value: float) -> Self:
+        return self._set("min_height", value)
+
+    def max_width(self, value: float) -> Self:
+        return self._set("max_width", value)
+
+    def max_height(self, value: float) -> Self:
+        return self._set("max_height", value)
+
+    def prevent_overflow(self, value: PreventOverflowConfig) -> Self:
+        return self._set("prevent_overflow", value)
+
+    def resizable(self, value: bool = True) -> Self:
+        return self._set("resizable", value)
+
+    def maximizable(self, value: bool = True) -> Self:
+        return self._set("maximizable", value)
+
+    def minimizable(self, value: bool = True) -> Self:
+        return self._set("minimizable", value)
+
+    def closable(self, value: bool = True) -> Self:
+        return self._set("closable", value)
+
+    def title(self, value: str) -> Self:
+        return self._set("title", value)
+
+    def fullscreen(self, value: bool = True) -> Self:
+        return self._set("fullscreen", value)
+
+    def focus(self, value: bool = True) -> Self:
+        return self._set("focus", value)
+
+    def focusable(self, value: bool = True) -> Self:
+        return self._set("focusable", value)
+
+    def transparent(self, value: bool = True) -> Self:
+        return self._set("transparent", value)
+
+    def maximized(self, value: bool = True) -> Self:
+        return self._set("maximized", value)
+
+    def visible(self, value: bool = True) -> Self:
+        return self._set("visible", value)
+
+    def decorations(self, value: bool = True) -> Self:
+        return self._set("decorations", value)
+
+    def always_on_bottom(self, value: bool = True) -> Self:
+        return self._set("always_on_bottom", value)
+
+    def always_on_top(self, value: bool = True) -> Self:
+        return self._set("always_on_top", value)
+
+    def visible_on_all_workspaces(self, value: bool = True) -> Self:
+        return self._set("visible_on_all_workspaces", value)
+
+    def content_protected(self, value: bool = True) -> Self:
+        return self._set("content_protected", value)
+
+    def skip_taskbar(self, value: bool = True) -> Self:
+        return self._set("skip_taskbar", value)
+
+    def window_classname(self, value: str) -> Self:
+        return self._set("window_classname", value)
+
+    def no_redirection_bitmap(self, value: bool = True) -> Self:
+        return self._set("no_redirection_bitmap", value)
+
+    def theme(self, value: Theme) -> Self:
+        return self._set("theme", value)
+
+    def title_bar_style(self, value: TitleBarStyle) -> Self:
+        return self._set("title_bar_style", value)
+
+    def traffic_light_position(self, value: dict[str, Any]) -> Self:
+        return self._set("traffic_light_position", value)
+
+    def hidden_title(self, value: bool = True) -> Self:
+        return self._set("hidden_title", value)
+
+    def accept_first_mouse(self, value: bool = True) -> Self:
+        return self._set("accept_first_mouse", value)
+
+    def tabbing_identifier(self, value: str) -> Self:
+        return self._set("tabbing_identifier", value)
+
+    def shadow(self, value: bool = True) -> Self:
+        return self._set("shadow", value)
+
+    def window_effects(self, value: WindowEffectsConfig) -> Self:
+        return self._set("window_effects", value)
+
+    def parent(self, value: str) -> Self:
+        return self._set("parent", value)
+
+    def background_color(self, value: ColorInput) -> Self:
+        return self._set("background_color", value)
+
+    def enable_drag_drop(self, value: bool = True) -> Self:
+        return self._set("enable_drag_drop", value)
+
+
+class AppBuilder(ConfigBuilder[AppConfig]):
+    """Fluent builder for AppConfig."""
+
+    model_type = AppConfig
 
     def __init__(self) -> None:
-        self._productname: str | None = None
-        self._version: str | None = None
-        self._app_id: UUID | None = None
+        super().__init__(windows=[], shortcuts=[], trays=[])
 
-        # Generate one stable IPC endpoint per builder instance.
-        self._connection = IpcConnectionConfig()
+    def product_name(self, value: str) -> Self:
+        return self._set("product_name", value)
 
-        self._windows: list[WindowConfig] = []
-        self._shortcuts: list[ShortcutConfig] = []
-        self._trays: list[TrayIconConfig] = []
-        self._app_menu: MenuConfig | None = None
+    def version(self, value: str) -> Self:
+        return self._set("version", value)
 
-    # --------------------------------------------------
-    # Application metadata
-    # --------------------------------------------------
+    def app_id(self, value: UUID) -> Self:
+        return self._set("app_id", value)
 
-    def with_product_name(self, name: str) -> ConfigBuilder:
-        self._productname = name
+    def connection(self, value: IpcClientConfig) -> Self:
+        return self._set("connection", value)
+
+    def window(self, value: WindowConfig | WindowBuilder) -> Self:
+        config = value.build() if isinstance(value, WindowBuilder) else value
+        self._values["windows"].append(config.model_copy(deep=True))
         return self
 
-    def with_version(self, version: str) -> ConfigBuilder:
-        self._version = version
+    def windows(self, *values: WindowConfig | WindowBuilder) -> Self:
+        """Append one or more windows."""
+        for value in values:
+            self.window(value)
         return self
 
-    def with_app_id(self, app_id: UUID) -> ConfigBuilder:
-        self._app_id = app_id
+    def dev_url(self, value: str) -> Self:
+        return self._set("dev_url", value)
+
+    def shortcut(self, value: ShortcutConfig) -> Self:
+        self._values["shortcuts"].append(value.model_copy(deep=True))
         return self
 
-    # --------------------------------------------------
-    # IPC connection
-    # --------------------------------------------------
-
-    def with_connection(self, connection: IpcConnectionConfig) -> ConfigBuilder:
-        self._connection = connection
+    def shortcuts(self, *values: ShortcutConfig) -> Self:
+        """Append one or more shortcuts."""
+        for value in values:
+            self.shortcut(value)
         return self
 
-    # --------------------------------------------------
-    # Windows
-    # --------------------------------------------------
-
-    def add_window(self, window: WindowConfig) -> ConfigBuilder:
-        self._windows.append(window)
+    def tray(self, value: TrayIconConfig) -> Self:
+        self._values["trays"].append(value.model_copy(deep=True))
         return self
 
-    def with_windows(self, *windows: WindowConfig) -> ConfigBuilder:
-        self._windows = list(windows)
+    def trays(self, *values: TrayIconConfig) -> Self:
+        """Append one or more trays."""
+        for value in values:
+            self.tray(value)
         return self
 
-    # --------------------------------------------------
-    # Shortcuts
-    # --------------------------------------------------
+    def app_menu(self, value: MenuConfig) -> Self:
+        return self._set("app_menu", value)
 
-    def add_shortcut(self, shortcut: ShortcutConfig) -> ConfigBuilder:
-        self._shortcuts.append(shortcut)
-        return self
+    def schema_version(self, value: int) -> Self:
+        return self._set("schema_version", value)
 
-    def with_shortcuts(self, *shortcuts: ShortcutConfig) -> ConfigBuilder:
-        self._shortcuts = list(shortcuts)
-        return self
 
-    # --------------------------------------------------
-    # Tray icons
-    # --------------------------------------------------
-
-    def add_tray(self, tray: TrayIconConfig) -> ConfigBuilder:
-        self._trays.append(tray)
-        return self
-
-    def with_trays(self, *trays: TrayIconConfig) -> ConfigBuilder:
-        self._trays = list(trays)
-        return self
-
-    # --------------------------------------------------
-    # Application menu
-    # --------------------------------------------------
-
-    def with_app_menu(self, menu: MenuConfig | None) -> ConfigBuilder:
-        self._app_menu = menu
-        return self
-
-    # --------------------------------------------------
-    # Build
-    # --------------------------------------------------
-
-    def build(self) -> Config:
-        """Build and validate an immutable configuration."""
-
-        if self._productname is None:
-            raise ValueError(
-                "Missing application product name. Call with_product_name() before build()."
-            )
-
-        if self._version is None:
-            raise ValueError("Missing application version. Call with_version() before build().")
-
-        if self._app_id is None:
-            raise ValueError("Missing application ID. Call with_app_id() before build().")
-
-        return Config(
-            productname=self._productname,
-            version=self._version,
-            app_id=self._app_id,
-            connection=self._connection,
-            windows=tuple(self._windows),
-            shortcuts=tuple(self._shortcuts),
-            trays=tuple(self._trays),
-            app_menu=self._app_menu,
-        )
-
-    def to_engine_bytes(self) -> bytes:
-        """Build and serialize the configuration for Rust."""
-        return self.build().to_engine_bytes()
-
-    # --------------------------------------------------
-    # Factory
-    # --------------------------------------------------
-
-    @classmethod
-    def from_config(cls, config: Config) -> ConfigBuilder:
-        """Create a builder from an existing configuration."""
-
-        return (
-            cls()
-            .with_product_name(config.productname)
-            .with_version(config.version)
-            .with_app_id(config.app_id)
-            .with_connection(config.connection)
-            .with_windows(*config.windows)
-            .with_shortcuts(*config.shortcuts)
-            .with_trays(*config.trays)
-            .with_app_menu(config.app_menu)
-        )
-
-    @classmethod
-    def default(
-        cls,
-        *,
-        product_name: str = "Taurino",
-        version: str = "0.1.0",
-        app_id: UUID | None = None,
-        webview_url: str = "about:blank",
-    ) -> ConfigBuilder:
-        """Create a fully initialized runtime configuration builder."""
-
-        if app_id is None:
-            app_id = uuid5(
-                NAMESPACE_URL,
-                f"taurino://{product_name.strip().lower()}",
-            )
-
-        # --------------------------------------------------
-        # IPC configuration
-        # --------------------------------------------------
-
-        connection = IpcConnectionConfig(
-            endpoint=f"taurino-{uuid4().hex}",
-            connect_timeout=10.0,
-            operation_timeout=30.0,
-            handshake_timeout=10.0,
-            max_message_size=1024 * 1024,
-            max_clients=1,
-            permissions=None,
-            security=IpcSecurity.NONE,
-            server_private_key_path=None,
-            client_public_key=None,
-            client_private_key_path=None,
-        )
-
-        # --------------------------------------------------
-        # WebView configuration
-        # --------------------------------------------------
-
-        webview = WebViewConfig(
-            label="main-webview",
-            url=webview_url,
-            x=0,
-            y=0,
-            width=None,
-            height=None,
-            visible=True,
-            devtools=False,
-        )
-
-        # --------------------------------------------------
-        # Window configuration
-        # --------------------------------------------------
-
-        window = WindowConfig(
-            label="main",
-            title=product_name,
-            center=True,
-            width=1000,
-            height=700,
-            min_width=None,
-            min_height=None,
-            resizable=True,
-            decorations=True,
-            transparent=False,
-            visible=True,
-            fullscreen=False,
-            maximized=False,
-            webviews=(webview,),
-        )
-
-        # --------------------------------------------------
-        # Shortcut configuration
-        # --------------------------------------------------
-
-        shortcuts: tuple[ShortcutConfig, ...] = (
-            ShortcutConfig(
-                accelerator="Ctrl+Q",
-                action="app.quit",
-                enabled=False,
-            ),
-        )
-
-        # --------------------------------------------------
-        # Application menu configuration
-        # --------------------------------------------------
-
-        app_menu = MenuConfig(
-            items=(
-                MenuItemConfig(
-                    id="application",
-                    text="Application",
-                    kind=MenuItemType.SUBMENU,
-                    enabled=True,
-                    accelerator=None,
-                    children=(
-                        MenuItemConfig(
-                            id="app.quit",
-                            text="Quit",
-                            kind=MenuItemType.ITEM,
-                            enabled=False,
-                            accelerator=None,
-                            children=(),
-                        ),
-                    ),
-                ),
-            ),
-        )
-
-        # --------------------------------------------------
-        # Tray configuration
-        # --------------------------------------------------
-
-        tray = TrayIconConfig(
-            id="main-tray",
-            icon=None,
-            tooltip=product_name,
-            visible=False,
-            menu=MenuConfig(items=()),
-        )
-
-        # --------------------------------------------------
-        # Build fluent configuration
-        # --------------------------------------------------
-
-        return (
-            cls()
-            .with_product_name(product_name)
-            .with_version(version)
-            .with_app_id(app_id)
-            .with_connection(connection)
-            .with_windows(window)
-            .with_shortcuts(*shortcuts)
-            .with_trays(tray)
-            .with_app_menu(app_menu)
-        )
+__all__ = ["ConfigBuilder", "WebViewBuilder", "WindowBuilder", "AppBuilder"]

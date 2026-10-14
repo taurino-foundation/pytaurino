@@ -20,8 +20,9 @@ from taurino._internal.multiplexer import (
 )
 from taurino._internal.runtime import Runtime
 from taurino.app_handle import AppHandle
-from taurino.config import Config, ConfigBuilder
+from taurino.config import AppBuilder
 from taurino.error import AppLifecycleError, ProtocolError
+from taurino.proto import AppConfig
 from taurino.state import State
 
 log = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ class App:
         setup_hook: Any,
         event_hook: Any,
     ) -> None:
-        self.config: ConfigBuilder = ConfigBuilder()
+        self._config_builder = AppBuilder()
+        self.config: AppConfig | None = None
         self.state = State()
         self.handle = AppHandle(self)
         self._registry = CommandRegistry()
@@ -88,40 +90,71 @@ class App:
     def engine_pid(self) -> int | None:
         return self._runtime.pid if self._runtime else None
 
-    def configure(self, config: Config) -> None:
+    def _require_config(self) -> AppConfig:
+        config = self.config
+
+        if config is None:
+            raise AppLifecycleError("Application configuration is not initialized")
+
+        return config
+
+    def configure(self) -> AppBuilder:
         """Replace global config only during Builder.setup, before IPC is bound."""
         if not self._starting or self._server is not None:
             raise AppLifecycleError("App.configure is only allowed in the setup hook")
-        self.config = ConfigBuilder.from_config(config)
+        return self._config_builder
 
-    async def __start(self, start_method: Literal["spawn", "fork"] = "spawn") -> None:
-        if self.config is None:
-            raise RuntimeError(
-                "Application configuration is missing. "
-                "Initialize the application using App.configure() first."
-            )
+    async def __start(
+        self,
+        start_method: Literal["spawn", "fork"] = "spawn",
+    ) -> None:
         if self._started or self._starting or self._stopped:
             raise AppLifecycleError("Application has already started or stopped")
+
         self._starting = True
+
         try:
+            # 1. Execute user setup hook
             if self._setup_hook is not None:
                 await _invoke_hook(self._setup_hook, self)
-            self._server = IpcServer(self.config._connection)
-            await self._server.start()  # MUST finish before the Rust child process starts.
-            self._accept_task = asyncio.create_task(self._accept_forever(), name="taurino-accept")
-            self._runtime = Runtime(
-                self.config.to_engine_bytes(),
-                start_timeout=self.config._connection.connect_timeout + 10.0,
+
+            # 2. Build and validate configuration
+            config: AppConfig = self._config_builder.build()
+            self.config = config
+
+            # 3. Start Python IPC server
+            server = IpcServer(config.connection)
+            self._server = server
+
+            await server.start()
+
+            # 4. Start IPC accept loop
+            self._accept_task = asyncio.create_task(
+                self._accept_forever(),
+                name="taurino-accept",
+            )
+
+            # 5. Create Rust runtime
+            runtime = Runtime(
+                config.to_engine_bytes(),
+                start_timeout=config.connection.connect_timeout + 10.0,
                 method=start_method,
             )
-            # multiprocessing spawn + readiness handshake must never block the asyncio server loop.
-            await asyncio.to_thread(self._runtime.start)
-            await self.handle.wait_connected(timeout=self.config._connection.connect_timeout)
+            self._runtime = runtime
+
+            # 6. Start Rust process without blocking asyncio
+            await asyncio.to_thread(runtime.start)
+
+            # 7. Wait for Rust IPC connection
+            await self.handle.wait_connected(timeout=config.connection.connect_timeout)
+
             self._started = True
             self._ready_to_run.set()
+
         except BaseException:
             await self.stop()
             raise
+
         finally:
             self._starting = False
 
@@ -158,8 +191,8 @@ class App:
             peer,
             Multiplexer(
                 peer.send,
-                timeout=self.config._connection.operation_timeout,
-                max_message_size=self.config._connection.max_message_size,
+                timeout=self._require_config().connection.operation_timeout,
+                max_message_size=self._require_config().connection.max_message_size,
             ),
         )
 
@@ -178,7 +211,7 @@ class App:
 
                 value = unpack(
                     raw,
-                    max_size=self.config._connection.max_message_size,
+                    max_size=self._require_config().connection.max_message_size,
                 )
 
                 if not isinstance(value, (list, tuple)):
@@ -305,7 +338,7 @@ class App:
     ) -> None:
         payload = pack(
             [request_id, status, message, data],
-            max_size=self.config._connection.max_message_size,
+            max_size=self._require_config().connection.max_message_size,
         )
         await session.peer.send(payload)
 
@@ -379,7 +412,7 @@ class App:
 
         data = pack(
             message,
-            max_size=self.config._connection.max_message_size,
+            max_size=self._require_config().connection.max_message_size,
         )
 
         await session.peer.send(data)
@@ -460,7 +493,7 @@ class App:
         await session.peer.send(
             pack(
                 response.to_array(),
-                max_size=self.config._connection.max_message_size,
+                max_size=self._require_config().connection.max_message_size,
             )
         )
     except asyncio.CancelledError:

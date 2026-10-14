@@ -36,12 +36,21 @@ pub struct IpcClientConfig {
     pub operation_timeout: f64,
     pub handshake_timeout: f64,
     pub max_message_size: u64,
+
+    #[serde(default = "default_max_clients")]
+    pub max_clients: u16,
+
     pub security: IpcSecurity,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_public_key: Option<ByteBuf>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_private_key_path: Option<PathBuf>,
 }
+
+const fn default_max_clients() -> u16 { 1 }
+
 impl IpcClientConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.endpoint.trim().is_empty(), "IPC endpoint must not be blank");

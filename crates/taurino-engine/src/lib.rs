@@ -21,9 +21,7 @@ fn spawn_shutdown_watcher(
         while running.load(Ordering::Acquire) {
             // multiprocessing.Event.wait(timeout), in Python's spawned child.
             let wait_result = Python::attach(|py| {
-                shutdown_event
-                    .call_method1(py, "wait", (0.1_f64,))
-                    .and_then(|result| result.extract::<bool>(py))
+                shutdown_event.call_method1(py, "wait", (0.1_f64,)).and_then(|result| result.extract::<bool>(py))
             });
 
             match wait_result {

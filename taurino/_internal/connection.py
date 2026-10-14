@@ -6,7 +6,7 @@ import asyncio
 import os
 from typing import TYPE_CHECKING, Self
 
-from taurino.config import IpcConnectionConfig, IpcSecurity
+from taurino.proto import IpcClientConfig, IpcSecurity
 
 if TYPE_CHECKING:
     from taunicorn import Connection, Server
@@ -30,7 +30,7 @@ class IpcPeer:
         connection: Connection,
         *,
         secure: SecureConnection | None,
-        config: IpcConnectionConfig,
+        config: IpcClientConfig,
     ):
         self.connection = connection
         self.secure = secure
@@ -132,7 +132,7 @@ class IpcPeer:
 class IpcServer:
     """Lifecycle, client admission, and peer ownership only (no router)."""
 
-    def __init__(self, config: IpcConnectionConfig):
+    def __init__(self, config: IpcClientConfig):
         self.config = config
         self._server: Server | None = None
         self._clients: set[IpcPeer] = set()

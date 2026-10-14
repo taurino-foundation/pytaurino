@@ -1,29 +1,61 @@
 import asyncio
 from typing import Any
+from uuid import uuid4
 
-from taurino import App, AppHandle, Builder, ConfigBuilder
+from taurino import (
+    App,
+    AppHandle,
+    Builder,
+    IpcClientConfig,
+    WebViewBuilder,
+    WindowBuilder,
+)
 
 builder = Builder()
 
 
 @builder.setup()
 def setup(app: App) -> None:
-    config = ConfigBuilder.default(
-        product_name="Taurino",
-        version="0.1.0",
-        webview_url="about:blank",
-    ).build()
+    (
+        app.configure()
+        .product_name("Taurino")
+        .version("0.1.0")
+        .app_id(uuid4())
+        .connection(IpcClientConfig())
+        .window(
+            WindowBuilder("main")
+            .title("Taurino Application")
+            .size(1200, 800)
+            .center(True)
+            .resizable(True)
+            .visible(True)
+            .webview(WebViewBuilder("root").url("about:blank").auto_resize(True).devtools(True))
+        )
+    )
 
-    app.configure(config)
     app.state.set({"initialized": True})
 
 
 @builder.command("greet")
 async def greet(name: str, handle: AppHandle) -> str:
-    await handle.emit("status", {"message": "Hallo JavaScript!"})
-    await handle.emit("status", {"percent": 50})
-    await handle.emit("ready", {"success": True})
-    # await handle.stop()
+    await handle.emit(
+        "status",
+        {"message": "Hallo JavaScript!"},
+        webview_label="root",
+    )
+
+    await handle.emit(
+        "status",
+        {"percent": 50},
+        webview_label="root",
+    )
+
+    await handle.emit(
+        "ready",
+        {"success": True},
+        webview_label="root",
+    )
+
     return f"Hello, {name}!"
 
 

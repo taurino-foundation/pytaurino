@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -90,7 +90,7 @@ class InvokeResponse(BaseModel):
         return packed
 
 
-class CommandErrorCode(str, Enum):
+class CommandErrorCode(StrEnum):
     NO_HANDLER = "NO_HANDLER"
     INVALID_PARAMS = "INVALID_PARAMS"
     VALIDATION_ERROR = "VALIDATION_ERROR"

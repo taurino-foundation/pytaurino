@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
-use pyo3::exceptions::PyRuntimeError;
-use taurino_engine::app::Taurino;
-use {pyo3::prelude::*, std::sync::OnceLock};
+use {
+    anyhow::{Context, Result},
+    pyo3::{exceptions::PyRuntimeError, prelude::*},
+    std::sync::OnceLock,
+    taurino_engine::app::Taurino,
+};
 
 pub fn get_taurino_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
@@ -12,27 +14,16 @@ pub fn get_taurino_version() -> &'static str {
     })
 }
 
-fn run_runtime(
-    config: Vec<u8>,
-    shutdown_event: Py<PyAny>,
-    notify_ready: Py<PyAny>,
-) -> Result<()> {
-    let app = Taurino::new(config, shutdown_event, notify_ready)
-        .context("Failed to initialize Taurino")?;
+fn run_runtime(config: Vec<u8>, shutdown_event: Py<PyAny>, notify_ready: Py<PyAny>) -> Result<()> {
+    let app = Taurino::new(config, shutdown_event, notify_ready).context("Failed to initialize Taurino")?;
 
     app.run().context("Taurino runtime failed")
 }
 
 #[pyfunction]
-fn runtime(
-    py: Python<'_>,
-    config: Vec<u8>,
-    shutdown_event: Py<PyAny>,
-    notify_ready: Py<PyAny>,
-) -> PyResult<()> {
+fn runtime(py: Python<'_>, config: Vec<u8>, shutdown_event: Py<PyAny>, notify_ready: Py<PyAny>) -> PyResult<()> {
     py.detach(move || {
-        run_runtime(config, shutdown_event, notify_ready)
-            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
+        run_runtime(config, shutdown_event, notify_ready).map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
     })
 }
 
