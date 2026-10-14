@@ -430,7 +430,9 @@ impl Default for FocusState {
     fn default() -> Self { Self::Blured { last_focused_webview_label: None } }
 }
 
+#[derive(Clone)]
 pub struct Config {
+    raw_config: AppConfig,
     pub product_name: String,
     pub uuid: String,
     pub id_name: String,
@@ -449,6 +451,7 @@ impl Config {
     /// Create a resolved runtime configuration.
     pub fn from_app_config(app: AppConfig) -> Result<Self> {
         app.validate()?;
+        let raw_config = app.clone();
         let uuid = app.app_id;
         let product_name = app.product_name.unwrap_or_else(|| format!("taurino-{}", uuid));
         let normalized_name = normalize_name(&product_name);
@@ -470,7 +473,17 @@ impl Config {
             fs::create_dir_all(path)
                 .with_context(|| format!("Failed to create {label} directory: {}", path.display()))?;
         }
-        Ok(Self { connection, product_name, uuid: uuid_string, id_name, data_dir, cache_dir, temp_dir, current_exe })
+        Ok(Self {
+            raw_config,
+            connection,
+            product_name,
+            uuid: uuid_string,
+            id_name,
+            data_dir,
+            cache_dir,
+            temp_dir,
+            current_exe,
+        })
     }
     /// Persistent WebView user data directory.
     pub fn webview_data_dir(&self) -> PathBuf { self.data_dir.join("webview") }
@@ -478,6 +491,8 @@ impl Config {
     pub fn resources_dir(&self) -> PathBuf { self.data_dir.join("resources") }
     /// Directory for runtime logs.
     pub fn logs_dir(&self) -> PathBuf { self.data_dir.join("logs") }
+
+    pub fn app_config(&self) -> AppConfig { self.raw_config.clone() }
 
     /// Resolves and prepares a window-specific WebView directory.
     pub fn prepare_webview_data_directory(

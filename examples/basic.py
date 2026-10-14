@@ -38,9 +38,10 @@ def setup(app: App) -> None:
 
 @builder.command("greet")
 async def greet(name: str, handle: AppHandle) -> str:
+    state = handle.state.get(dict)["initialized"]
     await handle.emit(
         "status",
-        {"message": "Hallo JavaScript!"},
+        {"message": f"Hallo JavaScript! with the state {state}"},
         webview_label="root",
     )
 
@@ -56,7 +57,7 @@ async def greet(name: str, handle: AppHandle) -> str:
         webview_label="root",
     )
 
-    return f"Hello, {name}!"
+    return f"Hello, {name}! with app state:{state}"
 
 
 @builder.on_event()

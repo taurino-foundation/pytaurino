@@ -1,6 +1,14 @@
 pub mod handler;
 pub mod index;
-use {std::thread::JoinHandle, tao::platform::run_return::EventLoopExtRunReturn};
+use {
+    anyhow::ensure,
+    std::thread::JoinHandle,
+    tao::{
+        platform::run_return::EventLoopExtRunReturn,
+        window::{Window, WindowId},
+    },
+    wry::WebView,
+};
 pub mod manager;
 use {
     crate::{
@@ -22,6 +30,12 @@ use {
         Config, EngineLoop, EngineLoopBuilder, EventLoopMessage, dispatcher::PendingInvoke, webview::WebContextStore,
     },
 };
+
+/// Native windows owned by the GUI event handler.
+///
+/// Each entry stores the WebView before its parent Window so that
+/// the WebView is dropped first during normal destruction.
+pub type NativeWindows = HashMap<WindowId, (WebView, Window)>;
 
 #[allow(dead_code)]
 pub struct Taurino {
@@ -65,15 +79,37 @@ impl Taurino {
     pub fn run(self) -> Result<()> {
         // Clone the manager because ownership of `self.manager` will later be
         // transferred into EngineEventHandler.
-        let _manager = self.manager.clone();
-        let proxy = self.event_loop.create_proxy();
+        let mut value: Option<(Window, WebView)> = None;
+        let manager = self.manager.clone();
+        let config = manager.config()?;
+        let target = &self.event_loop;
+
         // application lifecycle behavior for incoming Tao events.
 
-        // Both WebViews use the same context.
+        // ---------------------------------------------------------
+        // Create native windows and WebViews
+        // ---------------------------------------------------------
 
-        let (window, webview) = create_window(&self.event_loop, proxy)?;
+        let windows: NativeWindows = {
+            let config = manager.config()?;
+            let window_configs = &config.app_config().windows;
+            let proxy = self.event_loop.create_proxy();
+            let mut windows = HashMap::with_capacity(window_configs.len());
 
-        let event_handler = EventHandler::new(self.manager, window, webview);
+            for window_config in window_configs {
+                let (window, webview) = create_window(target, proxy.clone(), window_config)?;
+
+                let window_id = window.id();
+
+                windows.insert(window_id, (webview, window));
+            }
+
+            windows
+        };
+
+        ensure!(!windows.is_empty(), "No application windows configured");
+
+        let mut event_handler = EventHandler::new(self.manager, windows);
 
         // ---------------------------------------------------------------------
         // Enter GUI event loop

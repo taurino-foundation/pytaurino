@@ -25,6 +25,7 @@ impl Manager {
         Arc::new(Self { config, context, ipc_connection })
     }
 
+    pub fn config(&self) -> Result<Config> { Ok(self.config.clone()) }
     pub fn webcontext(&self) -> Result<MutexGuard<'_, HashMap<Option<PathBuf>, WebContext>>> {
         lock_state(&self.context, "WebContextStore")
     }

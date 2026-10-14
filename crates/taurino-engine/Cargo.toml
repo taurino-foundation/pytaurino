@@ -10,6 +10,7 @@ wry.workspace = true
 tao.workspace = true
 taurino-aio.workspace = true
 taurino-config.workspace = true
+taurino-core.workspace = true
 log.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
