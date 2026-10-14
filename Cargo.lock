@@ -4761,8 +4761,9 @@ dependencies = [
 name = "taurino"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "pyo3",
- "taurino-config",
+ "taurino-engine",
 ]
 
 [[package]]
@@ -4823,6 +4824,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "block2",
+ "dpi",
+ "getrandom 0.4.3",
  "gtk",
  "image",
  "log",
@@ -4833,10 +4836,13 @@ dependencies = [
  "objc2-web-kit",
  "once_cell",
  "os_info",
+ "raw-window-handle",
  "security-framework",
  "serde_json",
  "softbuffer",
  "tao",
+ "taurino-aio",
+ "taurino-config",
  "tray-icon",
  "webkit2gtk",
  "webview2-com",

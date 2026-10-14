@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3.workspace = true
-taurino-config.workspace = true
+anyhow.workspace = true
+taurino-engine.workspace = true
 [lints]
 workspace = true

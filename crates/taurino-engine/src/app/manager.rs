@@ -1,21 +1,31 @@
 use {
-    crate::window::context::WebContextManager,
     anyhow::Result,
-    std::sync::{Arc, Mutex, MutexGuard},
-    taurino_config::utils::lock_state,
+    std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{Arc, MutexGuard},
+    },
+    taurino_aio::IpcClient,
+    taurino_config::{
+        Config,
+        utils::lock_state,
+        webview::{WebContext, WebContextStore},
+    },
 };
 
+#[allow(dead_code)]
 pub struct Manager {
-    _context_manager: Arc<Mutex<WebContextManager>>,
+    config: Config,
+    context: WebContextStore,
+    pub ipc_connection: IpcClient,
 }
 
 impl Manager {
-    pub fn new(context_manager: Arc<Mutex<WebContextManager>>) -> Result<Arc<Self>> {
-        let manager = Arc::new(Self { _context_manager: context_manager });
-        Ok(manager)
+    pub fn new(config: Config, context: WebContextStore, ipc_connection: IpcClient) -> Arc<Self> {
+        Arc::new(Self { config, context, ipc_connection })
     }
 
-    pub fn webcontext<'a>(self: &'a Arc<Self>) -> Result<MutexGuard<'a, WebContextManager>> {
-        lock_state(&self._context_manager, "WebContextManager")
+    pub fn webcontext(&self) -> Result<MutexGuard<'_, HashMap<Option<PathBuf>, WebContext>>> {
+        lock_state(&self.context, "WebContextStore")
     }
 }

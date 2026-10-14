@@ -12,19 +12,19 @@ use {
     tao::{
         event::{Event, WindowEvent},
         event_loop::ControlFlow,
-        window::WindowId,
+        window::{Window, WindowId},
     },
     taurino_aio::IpcClient,
     taurino_config::{
         EngineEvent, EngineWindowTarget, EventLoopMessage, IpcEvent,
-        dispatcher::{PendingInvoke, RpcResponse, dispatch, reply_to_js, try_handle_notification},
+        dispatcher::{PendingInvoke, RpcResponse, allocate_request_id, dispatch, reply_to_js, try_handle_notification},
         log_if_err,
         protocol::InvokeResponse,
     },
     wry::WebView,
 };
 
-const MAIN_WEBVIEW_LABEL: &str = "webview-main";
+const MAIN_WEBVIEW_LABEL: &str = "root";
 const COMMAND_METHOD: &str = "commands.invoke";
 
 // Internal application events dispatched through Tao.
@@ -39,13 +39,25 @@ pub struct EventHandler {
 
     /// Prevents application cleanup from executing twice.
     shutting_down: AtomicBool,
+    window: Window,
+    webview: WebView,
 }
 
 impl EventHandler {
-    pub fn new(manager: Arc<Manager>) -> Self { Self { manager, shutting_down: AtomicBool::new(false) } }
+    pub fn new(manager: Arc<Manager>, window: Window, webview: WebView) -> Self {
+        Self { manager, shutting_down: AtomicBool::new(false), window, webview }
+    }
 
     /// Main Tao event-loop dispatcher.
-    pub fn handle_event(&self, event: EngineEvent<'_>, target: &EngineWindowTarget, control_flow: &mut ControlFlow) {
+    pub fn handle_event(
+        &self,
+        pending: &mut HashMap<u16, PendingInvoke>,
+        next_request_id: &mut u16,
+        ipc_connected: &mut bool,
+        event: EngineEvent<'_>,
+        target: &EngineWindowTarget,
+        control_flow: &mut ControlFlow,
+    ) {
         if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
@@ -60,7 +72,9 @@ impl EventHandler {
                 self.handle_window_event(window_id, event, target, control_flow)
             }
 
-            Event::UserEvent(event) => self.handle_user_event(event, target, control_flow),
+            Event::UserEvent(event) => {
+                self.handle_user_event(pending, next_request_id, ipc_connected, event, target, control_flow)
+            }
 
             Event::LoopDestroyed => {
                 self.shutdown();
@@ -90,8 +104,9 @@ impl EventHandler {
                 // Current policy: closing any window exits Taurino.
                 // Replace with manager-based window removal
                 // when multi-window lifecycle is implemented.
-                let _ = window_id;
-                *control_flow = ControlFlow::Exit;
+                if window_id == self.window.id() {
+                    *control_flow = ControlFlow::Exit;
+                }
             }
 
             WindowEvent::Destroyed => {
@@ -119,6 +134,9 @@ impl EventHandler {
     /// Handles Taurino application user events.
     fn handle_user_event(
         &self,
+        pending: &mut HashMap<u16, PendingInvoke>,
+        next_request_id: &mut u16,
+        ipc_connected: &mut bool,
         event: EventLoopMessage,
         _target: &EngineWindowTarget,
         control_flow: &mut ControlFlow,
@@ -130,14 +148,59 @@ impl EventHandler {
             EventLoopMessage::EngineTask(engine_task) => engine_task(_target, control_flow)?,
             EventLoopMessage::Task(task) => task(),
             EventLoopMessage::EvalScript(_, _, _) => {}
-            EventLoopMessage::JsInvoke { webview_label, request } => {}
-            EventLoopMessage::JsReply { webview_label, request, response } => {}
-            EventLoopMessage::IPC(ipc_event) => {
-                /*
-                    handle_ipc_message(&payload, &webview, &mut pending, &ipc_client);
+            EventLoopMessage::JsInvoke { webview_label, request } => {
+                if webview_label != MAIN_WEBVIEW_LABEL {
+                    eprintln!("Unknown WebView: {webview_label}");
+                } else if !*ipc_connected {
+                    reply_to_js(&self.webview, &request, Err("Python IPC connection is not available".into()));
+                } else if let Some(request_id) = allocate_request_id(pending, next_request_id) {
+                    // Same MessagePack format as Python's App._serve_peer().
+                    let encoded = rmp_serde::to_vec_named(&(request_id, COMMAND_METHOD, [&request]));
 
-                */
+                    match encoded {
+                        Ok(payload) => match self.manager.ipc_connection.send(payload) {
+                            Ok(()) => {
+                                pending.insert(request_id, PendingInvoke { webview_label, request });
+                            }
+                            Err(error) => {
+                                reply_to_js(&self.webview, &request, Err(format!("IPC queue error: {error:#}")))
+                            }
+                        },
+                        Err(error) => {
+                            reply_to_js(&self.webview, &request, Err(format!("MessagePack encoding failed: {error}")))
+                        }
+                    }
+                } else {
+                    reply_to_js(&self.webview, &request, Err("Too many pending IPC requests".into()));
+                }
             }
+            EventLoopMessage::JsReply { webview_label, request, response } => {
+                if webview_label == MAIN_WEBVIEW_LABEL {
+                    reply_to_js(&self.webview, &request, response);
+                } else {
+                    eprintln!("Unknown WebView: {webview_label}");
+                }
+            }
+            EventLoopMessage::IPC(ipc_event) => match ipc_event {
+                IpcEvent::Message(payload) => {
+                    handle_ipc_message(&payload, &self.webview, pending, &self.manager.ipc_connection)
+                }
+                IpcEvent::Disconnected(reason) => {
+                    *ipc_connected = false;
+                    eprintln!("IPC disconnected: {reason}");
+
+                    // A transport failure must reject all pending JS Promises.
+                    for (_, entry) in pending.drain() {
+                        if entry.webview_label == MAIN_WEBVIEW_LABEL {
+                            reply_to_js(
+                                &self.webview,
+                                &entry.request,
+                                Err(format!("Python IPC disconnected: {reason}")),
+                            );
+                        }
+                    }
+                }
+            },
         }
 
         Ok(())

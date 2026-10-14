@@ -27,7 +27,6 @@ wry = { version = "0.57.0", default-features = false, features = [
   "os-webview",
   "linux-body",
 ] }
-raw-window-handle = "0.6"
 tao = { version = "0.37.0", default-features = false, features = ["rwh_06", "serde"] }
 url = { version = "2", features = ["serde"]  }
 dpi = { version = "0.1", features = ["serde"] }

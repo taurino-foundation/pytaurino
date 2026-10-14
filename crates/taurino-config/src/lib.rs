@@ -1,5 +1,5 @@
 use {
-    crate::{app::AppConfig, package::version_deserializer},
+    crate::{app::AppConfig, mix::IpcClientConfig, package::version_deserializer},
     dpi::{Position, Size},
     serde::{Deserialize, Deserializer, Serialize, Serializer},
     std::{
@@ -438,6 +438,7 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub temp_dir: PathBuf,
     pub current_exe: PathBuf,
+    pub connection: IpcClientConfig,
 }
 impl Config {
     /// Decode MessagePack and initialize application paths.
@@ -452,6 +453,7 @@ impl Config {
         let product_name = app.product_name.unwrap_or_else(|| format!("taurino-{}", uuid));
         let normalized_name = normalize_name(&product_name);
         // UUID validation guarantees ASCII hexadecimal characters.
+        let connection = app.connection;
         let uuid_string = uuid.to_string();
         let short_uuid = &uuid_string[..8];
         let id_name = format!("{normalized_name}_{short_uuid}");
@@ -468,7 +470,7 @@ impl Config {
             fs::create_dir_all(path)
                 .with_context(|| format!("Failed to create {label} directory: {}", path.display()))?;
         }
-        Ok(Self { product_name, uuid: uuid_string, id_name, data_dir, cache_dir, temp_dir, current_exe })
+        Ok(Self { connection, product_name, uuid: uuid_string, id_name, data_dir, cache_dir, temp_dir, current_exe })
     }
     /// Persistent WebView user data directory.
     pub fn webview_data_dir(&self) -> PathBuf { self.data_dir.join("webview") }

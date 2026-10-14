@@ -1,14 +1,12 @@
 use {
-    crate::window::window::WindowFrame,
+    crate::window::main_window::WindowFrame,
     std::{collections::HashMap, sync::Arc},
     tao::window::WindowId,
 };
 
-pub mod build;
-pub mod context;
 pub mod factory;
 pub mod webview;
-pub mod window;
+pub mod main_window;
 
 pub struct WindowManager {
     windows: HashMap<String, Arc<WindowFrame>>,
