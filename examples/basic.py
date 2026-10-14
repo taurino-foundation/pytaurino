@@ -14,7 +14,7 @@ from taurino import (
 builder = Builder()
 
 
-@builder.setup()
+@builder.setup
 def setup(app: App) -> None:
     (
         app.configure()
@@ -25,7 +25,7 @@ def setup(app: App) -> None:
         .window(
             WindowBuilder("main")
             .title("Taurino Application")
-            .size(1200, 800)
+            .size(800, 600)
             .center(True)
             .resizable(True)
             .visible(True)

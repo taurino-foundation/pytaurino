@@ -7,11 +7,11 @@ use taurino_config::PhysicalRect;
     target_os = "netbsd",
     target_os = "openbsd"
 ))]
-mod linux;
+pub mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 #[cfg(windows)]
-mod windows;
+pub mod windows;
 
 pub trait MonitorExt {
     /// Get the work area of this monitor
@@ -62,4 +62,4 @@ pub trait WindowExt {
     target_os = "openbsd"
 ))]
 pub mod undecorated_resizing;
-mod util;
+pub mod util;

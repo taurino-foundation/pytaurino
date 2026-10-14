@@ -4857,6 +4857,7 @@ name = "taurino-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dpi",
  "log",
  "pyo3",
  "rmp-serde",

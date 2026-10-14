@@ -8,6 +8,7 @@ pyo3.workspace = true
 anyhow.workspace = true
 wry.workspace = true
 tao.workspace = true
+dpi.workspace = true
 taurino-aio.workspace = true
 taurino-config.workspace = true
 taurino-core.workspace = true
