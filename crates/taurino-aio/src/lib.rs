@@ -1,5 +1,6 @@
 use {
     anyhow::{Context, Result, anyhow, bail, ensure},
+    serde::Serialize,
     std::{
         sync::{
             Arc, Mutex,
@@ -156,6 +157,7 @@ impl IpcClient {
 
     pub fn is_stopping(&self) -> bool { self.inner.stopping.load(Ordering::Acquire) }
 
+    pub fn data_transfer<S: Serialize>(&self, message: &S) -> Result<()> { self.send(rmp_serde::to_vec(message)?) }
     /// Nonblocking shutdown request.
     pub fn request_shutdown(&self) {
         self.inner.stopping.store(true, Ordering::Release);

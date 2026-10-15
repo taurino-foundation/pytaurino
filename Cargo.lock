@@ -4772,6 +4772,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "rmp-serde",
+ "serde",
  "taunicorn",
  "taurino-config",
  "tokio",
@@ -4837,6 +4839,8 @@ dependencies = [
  "once_cell",
  "os_info",
  "raw-window-handle",
+ "rmp-serde",
+ "rmpv",
  "security-framework",
  "serde",
  "serde_json",

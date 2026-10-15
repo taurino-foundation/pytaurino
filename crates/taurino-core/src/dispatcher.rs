@@ -1,15 +1,17 @@
 use {
-    crate::{
-        EventLoopMessage,
-        protocol::{InvokeRequest, InvokeResponse},
-    },
+    crate::webview::WebView,
     anyhow::{Context, Result},
     rmpv::Value as RmpvValue,
     serde::Deserialize,
-    serde_json::Value as JsonValue,
+    serde_json::{Value as JsonValue, json},
     std::collections::HashMap,
     tao::event_loop::EventLoopProxy,
-    wry::{InitializationScript, WebView, WebViewBuilder},
+    taurino_aio::IpcClient,
+    taurino_config::{
+        EngineLoopProxy, EventLoopMessage,
+        protocol::{InvokeRequest, InvokeResponse},
+    },
+    wry::{InitializationScript, WebViewBuilder},
 };
 
 pub type RpcResponse = (u16, i32, String, JsonValue);
@@ -85,13 +87,11 @@ pub fn response_error(request_id: u16, code: i32, message: &str) -> Result<Vec<u
 
 pub fn install_ipc_bridge(
     builder: WebViewBuilder<'_>,
+    window_label: String,
     webview_label: String,
-    proxy: EventLoopProxy<EventLoopMessage>,
+    proxy: EngineLoopProxy,
 ) -> WebViewBuilder<'_> {
     builder.with_ipc_handler(move |request| {
-        // In Produktion: Request-URI und erlaubte
-        // Frontend-Origin überprüfen.
-
         if request.body().len() > 1024 * 1024 {
             eprintln!("IPC message too large");
             return;
@@ -105,14 +105,17 @@ pub fn install_ipc_bridge(
             }
         };
 
-        let event = EventLoopMessage::JsInvoke { webview_label: webview_label.clone(), request: message };
+        let event = EventLoopMessage::JsInvoke {
+            window_label: window_label.clone(),
+            webview_label: webview_label.clone(),
+            request: message,
+        };
 
-        if proxy.send_event(event).is_err() {
-            eprintln!("GUI event loop unavailable");
+        if let Err(error) = proxy.send_event(event) {
+            eprintln!("Failed to forward JS invoke: {error}");
         }
     })
 }
-
 pub fn all_initialization_scripts(
     window_label: &str,
     webview_label: &str,
@@ -554,7 +557,7 @@ pub fn try_handle_notification(payload: &[u8], webview: &WebView) -> bool {
         return false;
     }
 
-    if notification.webview_label != "webview-main" {
+    if notification.webview_label != webview.label() {
         eprintln!("Unknown WebView: {}", notification.webview_label);
         return true;
     }
@@ -567,6 +570,7 @@ pub fn try_handle_notification(payload: &[u8], webview: &WebView) -> bool {
 }
 
 pub struct PendingInvoke {
+    pub window_label: String,
     pub webview_label: String,
     pub request: InvokeRequest,
 }

@@ -1,10 +1,18 @@
 
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
+# =============================================================================
+# Build System
+# =============================================================================
+
 [build-system]
 requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
+
+# =============================================================================
+# Project Metadata
+# =============================================================================
 
 [project]
 name = "taurino"
@@ -12,7 +20,6 @@ dynamic = ["version"]
 
 description = "An asynchronous, cross-platform desktop GUI framework for Python, powered by Rust, Tao, and Wry."
 readme = "README.md"
-
 requires-python = ">=3.11,<3.15"
 
 license = "MIT OR Apache-2.0"
@@ -64,10 +71,15 @@ classifiers = [
 
 dependencies = [
     "msgpack>=1.1,<2",
+    "numpy>=2.4.6",
     "pydantic>=2.11,<3",
     "taunicorn>=0.1.9,<0.2",
 ]
 
+
+# =============================================================================
+# Project URLs
+# =============================================================================
 
 [project.urls]
 Homepage = "https://github.com/taurino-foundation/taurino"
@@ -75,13 +87,17 @@ Repository = "https://github.com/taurino-foundation/taurino"
 Issues = "https://github.com/taurino-foundation/taurino/issues"
 
 
-# --------------------------------------------------
-# Dependency Groups (uv / PEP 735)
-# --------------------------------------------------
+# =============================================================================
+# Development Dependencies - PEP 735
+# =============================================================================
 
 [dependency-groups]
 dev = [
+    { include-group = "lint" },
     { include-group = "test" },
+]
+
+lint = [
     "ruff>=0.17.0,<1",
 ]
 
@@ -91,10 +107,9 @@ test = [
 ]
 
 
-# --------------------------------------------------
+# =============================================================================
 # Maturin / PyO3
-# --------------------------------------------------
-
+# =============================================================================
 
 [tool.maturin]
 manifest-path = "crates/taurino/Cargo.toml"
@@ -102,30 +117,79 @@ bindings = "pyo3"
 module-name = "taurino.core._taurino"
 strip = true
 
-# --------------------------------------------------
-# Ruff
-# --------------------------------------------------
+
+# =============================================================================
+# Ruff - Global Settings
+# =============================================================================
 
 [tool.ruff]
 target-version = "py311"
-line-length = 100
+line-length = 120
+indent-width = 4
+
+# Keep the same stable formatting behavior across platforms.
+preview = false
+
+# =============================================================================
+# Ruff - Linter
+# =============================================================================
 
 [tool.ruff.lint]
 select = [
-    "E4",
-    "E7",
-    "E9",
-    "F",
-    "I",
-    "B",
-    "BLE",
-    "UP",
+    "E4",     # Import errors
+    "E7",     # Statement errors
+    "E9",     # Runtime and syntax errors
+    "F",      # Pyflakes
+    "I",      # Import sorting
+    "B",      # Bugbear
+    "BLE",    # Blind exception handling
+    "UP",     # Modern Python syntax
 ]
 
+# Enforce the configured maximum line length.
+extend-select = ["E501"]
 
-# --------------------------------------------------
+# Avoid automatically applying fixes that could change behavior.
+unfixable = [
+    "B",
+    "BLE",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["taurino"]
+combine-as-imports = true
+
+# =============================================================================
+# Ruff - Formatter
+# =============================================================================
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+
+# =============================================================================
 # Pytest / AsyncIO
-# --------------------------------------------------
+# =============================================================================
 
 [tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+
+
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
+
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+
+xfail_strict = true

@@ -41,7 +41,6 @@ pub mod utils;
 pub mod starting_binary;
 pub mod window;
 pub mod webview;
-pub mod dispatcher;
 pub mod protocol;
 pub use wry::WebContext as WryContext;
 #[derive(Debug)]
@@ -118,10 +117,13 @@ pub enum EventLoopMessage {
 
     EvalScript(String, String, String),
     JsInvoke {
+        window_label: String,
         webview_label: String,
         request: InvokeRequest,
     },
+
     JsReply {
+        window_label: String,
         webview_label: String,
         request: InvokeRequest,
         response: std::result::Result<InvokeResponse, String>,

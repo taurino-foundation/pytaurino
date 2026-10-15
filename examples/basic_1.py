@@ -14,8 +14,7 @@ from taurino import (
 builder = Builder()
 
 
-@builder.setup
-def setup(app: App) -> None:
+def setup_app(app: App) -> None:
     (
         app.configure()
         .product_name("Taurino")
@@ -39,6 +38,7 @@ def setup(app: App) -> None:
 @builder.command("greet")
 async def greet(name: str, handle: AppHandle) -> str:
     state = handle.state.get(dict)["initialized"]
+
     await handle.emit(
         "status",
         {"message": f"Hallo JavaScript! with the state {state}"},
@@ -60,18 +60,50 @@ async def greet(name: str, handle: AppHandle) -> str:
     return f"Hello, {name}! with app state:{state}"
 
 
-@builder.on_event()
-async def event_loop(
+# Tao EventLoop
+async def on_loop_event(
+    handle: AppHandle,
+    event: dict[str, Any],
+) -> None:
+    print("Loop event:", event)
+
+
+# Tao WindowEvent
+async def on_window_event(
     handle: AppHandle,
     event: dict[str, Any],
 ) -> None:
     match event.get("name"):
-        case "window":
-            print(event.get("payload"))
+        case "resized":
+            print("Window resized:", event)
+
+        case "focused":
+            print("Window focused:", event)
+
+        case "moved":
+            print("Window moved:", event)
+
+        case "close_requested":
+            print("Window close requested:", event)
+
+
+# Wry WebView Events
+async def on_webview_event(
+    handle: AppHandle,
+    event: dict[str, Any],
+) -> None:
+    print("WebView event:", event)
 
 
 async def main() -> None:
-    app = builder.build()
+    app = (
+        builder.setup(setup_app)
+        .on_loop_event(on_loop_event)
+        .on_window_event(on_window_event)
+        .on_webview_event(on_webview_event)
+        .build()
+    )
+
     await app.run()
 
 

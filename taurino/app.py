@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from taurino._internal.command import CommandRegistry, InvokeRequest
+from taurino._internal.command import CommandEnvelope, CommandRegistry, InvokeRequest
 from taurino._internal.connection import IpcPeer, IpcServer
 from taurino._internal.multiplexer import (
     ApiResponse,
@@ -18,9 +18,9 @@ from taurino._internal.multiplexer import (
     pack,
     unpack,
 )
-from taurino._internal.runtime import Runtime
 from taurino.app_handle import AppHandle
 from taurino.config import AppBuilder
+from taurino.core.runtime import Runtime
 from taurino.error import AppLifecycleError, ProtocolError
 from taurino.proto import AppConfig
 from taurino.state import State
@@ -57,8 +57,12 @@ class App:
         self,
         *,
         commands: dict[str, Any],
-        setup_hook: Any,
-        event_hook: Any,
+        setup_hook: Any = None,
+        loop_event_hook: Any = None,
+        window_event_hook: Any = None,
+        webview_event_hook: Any = None,
+        systemtray_event_hook: Any = None,
+        shortcut_event_hook: Any = None,
     ) -> None:
         self._config_builder = AppBuilder()
         self.config: AppConfig | None = None
@@ -69,7 +73,14 @@ class App:
         for name, fn in commands.items():
             self._registry.register(name, fn)
         self._setup_hook = setup_hook
-        self._event_hook = event_hook
+        self._native_event_hooks: dict[str, Any] = {
+            "loop": loop_event_hook,
+            "window": window_event_hook,
+            "webview": webview_event_hook,
+            "tray": systemtray_event_hook,
+            "shortcut": shortcut_event_hook,
+        }
+
         self._server: IpcServer | None = None
         self._runtime: Runtime | None = None
         self._accept_task: asyncio.Task[None] | None = None
@@ -146,7 +157,7 @@ class App:
             await asyncio.to_thread(runtime.start)
 
             # 7. Wait for Rust IPC connection
-            await self.handle.wait_connected(timeout=config.connection.connect_timeout)
+            await self.handle.wait_connected(timeout=config.connection.connect_timeout)  # type: ignore
 
             self._started = True
             self._ready_to_run.set()
@@ -217,7 +228,50 @@ class App:
                 if not isinstance(value, (list, tuple)):
                     log.warning("Invalid IPC envelope type")
                     continue
+                # --------------------------------------------------
+                # Native Event: Rust -> Python
+                # ["taurino.event", {"type": "...", "payload": {...}}]
+                # --------------------------------------------------
+                if len(value) == 2:
+                    method, event = value
 
+                    if method != EVENT_METHOD:
+                        log.warning("Unknown IPC notification: %r", method)
+                        continue
+
+                    if not isinstance(event, dict):
+                        log.warning("Invalid native event payload")
+                        continue
+
+                    event_type = event.get("type")
+                    event_payload = event.get("payload")
+
+                    if (
+                        not isinstance(event_type, str)
+                        or event_type not in self._native_event_hooks
+                        or not isinstance(event_payload, dict)
+                    ):
+                        log.warning("Invalid native event: %r", event)
+                        continue
+
+                    # Kein registrierter Hook -> keine weitere Verarbeitung.
+                    if self._native_event_hooks[event_type] is None:
+                        continue
+
+                    # Anzahl paralleler Event-Tasks begrenzen.
+                    if len(messages) >= 512:
+                        log.warning("Native event queue is full")
+                        continue
+
+                    task = asyncio.create_task(
+                        self._dispatch_native_event(event),
+                        name=f"taurino-event-{event_type}",
+                    )
+
+                    messages.add(task)
+                    task.add_done_callback(messages.discard)
+
+                    continue
                 # RPC response: Rust -> Python Multiplexer
                 if len(value) == 4:
                     response = ApiResponse.from_array(value)
@@ -258,12 +312,25 @@ class App:
                     continue
 
                 try:
-                    invoke = InvokeRequest.model_validate(arguments[0])
+                    envelope = CommandEnvelope.model_validate(arguments[0])
+
+                    if envelope.cmd != envelope.request.cmd:
+                        await self._send_rpc_response(
+                            session,
+                            request_id,
+                            400,
+                            "Command name mismatch",
+                        )
+                        continue
+
+                    invoke = envelope.request
+
                 except ValidationError:
                     log.warning(
                         "Rejected malformed command request",
                         exc_info=True,
                     )
+
                     await self._send_rpc_response(
                         session,
                         request_id,
@@ -327,6 +394,29 @@ class App:
 
                 if self._primary_session is None:
                     self._connected.clear()
+
+    async def _dispatch_native_event(
+        self,
+        event: dict,
+    ) -> None:
+        """Dispatch a native event to its registered category hook."""
+
+        hook = self._native_event_hooks.get(event["type"])
+
+        if hook is None:
+            return
+
+        try:
+            await _invoke_hook(
+                hook,
+                self.handle,
+                event["payload"],
+            )
+        except Exception:
+            log.exception(
+                "Native event hook failed: %s",
+                event["type"],
+            )
 
     async def _send_rpc_response(
         self,
@@ -452,60 +542,3 @@ class App:
 
     async def __aexit__(self, *_: Any) -> None:
         await self.stop()
-
-
-""" async def _dispatch_request(
-    self, session: _Session, request: InvokeRequest, capacity: asyncio.Semaphore
-) -> None:
-    try:
-        if request.method == COMMAND_METHOD:
-            args = request.args.value
-            if (
-                len(args) != 4
-                or not isinstance(args[0], str)
-                or not isinstance(args[1], int)
-                or not isinstance(args[2], int)
-                or not isinstance(args[3], dict)
-            ):
-                response = request.err(
-                    400,
-                    "Command arguments must be [name, result_id, error_id, data]",
-                )
-            else:
-                name, result_id, error_id, data = args
-                result = await self._registry.dispatch(
-                    name, result_id=result_id, error_id=error_id, data=data
-                )
-                response = request.ok(result)
-        elif request.method == EVENT_METHOD:
-            if len(request.args.value) != 1:
-                response = request.err(
-                    400, "Event arguments must contain exactly one event"
-                )
-            else:
-                if self._event_hook is not None:
-                    await _invoke_hook(
-                        self._event_hook, self.handle, request.args.single()
-                    )
-                response = request.ok(None)
-        else:
-            response = request.err(404, "Unknown internal IPC method")
-        await session.peer.send(
-            pack(
-                response.to_array(),
-                max_size=self._require_config().connection.max_message_size,
-            )
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        log.exception("Request dispatch failed")
-        try:
-            await session.peer.send(
-                pack(request.err(500, "Internal dispatch error").to_array())
-            )
-        except Exception:
-            log.exception("Failed to send dispatch error")
-    finally:
-        capacity.release()
- """

@@ -4,7 +4,7 @@ pub mod webview;
 pub mod wrappers;
 pub mod platforms;
 pub mod resources;
-
+pub mod dispatcher;
 pub mod events;
 use {tao::window::Theme as TaoTheme, taurino_config::Theme};
 

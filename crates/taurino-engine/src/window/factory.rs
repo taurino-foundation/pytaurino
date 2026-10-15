@@ -17,11 +17,11 @@ use {
     },
     taurino_config::{
         EngineWindowTarget, WebContext, arc_mut,
-        dispatcher::{all_initialization_scripts, install_ipc_bridge},
         webview::{BackgroundThrottlingPolicy, WebViewConfig, WebViewId},
         window::{WindowConfig, WindowId},
     },
     taurino_core::{
+        dispatcher::{all_initialization_scripts, install_ipc_bridge},
         platforms::{MonitorExt, util::calculate_window_center_position},
         webview::{WebViewManager, apply_build_webview, apply_webview_bounds},
         window::{Window, WindowBuilder, find_monitor_for_position},
@@ -227,7 +227,7 @@ pub(crate) fn create_webview(
             BackgroundThrottlingPolicy::Throttle => wry::BackgroundThrottlingPolicy::Throttle,
         });
     }
-    webview_builder = install_ipc_bridge(webview_builder, webview_label.clone(), proxy.clone());
+    webview_builder = install_ipc_bridge(webview_builder, window_label, webview_label.clone(), proxy.clone());
     webview_builder = webview_builder.with_html(HTML);
     if options.javascript_disabled {
         webview_builder = webview_builder.with_javascript_disabled();

@@ -14,8 +14,9 @@ from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from typing import Any, Literal, Protocol, cast
 
-from taurino.core import runtime
 from taurino.error import RuntimeStartError, RuntimeStateError
+
+from . import runtime
 
 
 class StatusConnection(Protocol):

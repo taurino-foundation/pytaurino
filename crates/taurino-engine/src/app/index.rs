@@ -1,432 +1,498 @@
-pub const HTML: &str = r#"<!DOCTYPE html>
+pub const HTML: &str = r###"
+<!DOCTYPE html>
 <html lang="de">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Taurino - Command Playground</title>
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-        body {
-            margin: 0;
-            min-height: 100vh;
-            background: #0e1117;
-            color: #e6edf3;
-            font-family: system-ui, sans-serif;
-            padding: 32px;
-        }
-        .container {
-            max-width: 760px;
-            margin: 0 auto;
-        }
-        h1 {
-            font-size: 28px;
-            margin-bottom: 6px;
-        }
-        .subtitle {
-            color: #8b949e;
-            margin-bottom: 28px;
-        }
-        .card {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 12px;
-            padding: 22px;
-            margin-bottom: 18px;
-        }
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 14px;
-        }
-        .dot {
-            width: 10px;
-            height: 10px;
-            background: #f0883e;
-            border-radius: 50%;
-        }
-        .dot.connected {
-            background: #3fb950;
-        }
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #8b949e;
-            font-size: 13px;
-        }
-        input, textarea {
-            width: 100%;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 7px;
-            padding: 12px;
-            color: #e6edf3;
-            font-family: monospace;
-            font-size: 14px;
-            outline: none;
-        }
-        input:focus, textarea:focus {
-            border-color: #58a6ff;
-        }
-        textarea {
-            min-height: 130px;
-            resize: vertical;
-        }
-        .field {
-            margin-bottom: 18px;
-        }
-        button {
-            background: #238636;
-            border: none;
-            border-radius: 7px;
-            padding: 11px 20px;
-            color: white;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        button:hover {
-            background: #2ea043;
-        }
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        .secondary {
-            background: #30363d;
-        }
-        .secondary:hover {
-            background: #484f58;
-        }
-        .buttons {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        pre {
-            background: #0d1117;
-            border: 1px solid #30363d;
-            padding: 16px;
-            border-radius: 8px;
-            overflow: auto;
-            min-height: 90px;
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-            font-size: 13px;
-            line-height: 1.6;
-        }
-        .success {
-            color: #3fb950;
-        }
-        .error {
-            color: #f85149;
-        }
-        .info {
-            color: #58a6ff;
-        }
-        .hint {
-            margin: 10px 0 16px;
-            color: #8b949e;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-        .event-count {
-            color: #8b949e;
-            font-size: 13px;
-            margin-top: 14px;
-        }
-        .code-example {
-            min-height: 0;
-            margin: 12px 0 0;
-            color: #c9d1d9;
-        }
-        .event-log {
-            min-height: 130px;
-            max-height: 280px;
-            overflow-y: auto;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Taurino | Measurement Console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f19;
+      --panel: #111a28;
+      --panel-deep: #0d1521;
+      --border: #26364a;
+      --text: #eaf1fa;
+      --muted: #95a8bf;
+      --blue: #61afff;
+      --green: #54d6a0;
+      --amber: #f7bf69;
+      --red: #f4838f;
+      --radius: 13px;
+      font-family: Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    .shell { max-width: 1210px; margin: 0 auto; padding: 22px; }
+    .topbar, .brand, .connection, .row, .panel-heading, .toolbar,
+    .fieldline, .stat-top, .progress-head { display: flex; align-items: center; }
+    .topbar, .panel-heading, .progress-head { justify-content: space-between; }
+    .topbar { gap: 18px; margin-bottom: 24px; }
+    .brand { gap: 12px; }
+    .logo { width: 39px; height: 39px; border-radius: 12px; display: grid; place-items: center;
+      background: linear-gradient(140deg, #244c85, #152943); color: #dcecff; font-size: 19px; font-weight: 850; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 19px; letter-spacing: -.35px; }
+    .subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .connection { gap: 8px; color: var(--muted); font-size: 12px; padding: 9px 13px;
+      border: 1px solid var(--border); background: var(--panel); border-radius: 999px; }
+    .dot { width: 8px; height: 8px; background: var(--amber); border-radius: 50%; flex: 0 0 auto; }
+    .dot.ok { background: var(--green); box-shadow: 0 0 10px #54d6a05c; }
+    .dot.fail { background: var(--red); }
+    .layout { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr);
+      align-items: start; gap: 16px; }
+    .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .panel { min-width: 0; background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; }
+    .panel-heading { gap: 12px; margin-bottom: 16px; }
+    .panel-heading h2 { font-size: 14px; font-weight: 700; }
+    .eyebrow { color: var(--muted); font-size: 11px; letter-spacing: 1.5px;
+      text-transform: uppercase; margin-bottom: 7px; }
+    .state-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .state-title strong { font-size: 27px; letter-spacing: -.8px; }
+    .chip { border-radius: 999px; padding: 5px 10px; border: 1px solid var(--border);
+      color: var(--muted); font-size: 11px; font-weight: 750; letter-spacing: .6px; }
+    .chip.ready { background: #123329; border-color: #275c49; color: var(--green); }
+    .chip.active { background: #142d49; border-color: #24547e; color: var(--blue); }
+    .chip.pause { background: #3e2b13; border-color: #6b4a26; color: var(--amber); }
+    .chip.error { background: #40202b; border-color: #78404c; color: var(--red); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .metric { background: var(--panel-deep); border: 1px solid var(--border);
+      border-radius: 11px; padding: 17px; min-width: 0; }
+    .stat-top { justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+    .color-i { color: var(--blue); }
+    .color-u { color: var(--green); }
+    .value { margin-top: 12px; font-size: 32px; font-variant-numeric: tabular-nums;
+      font-weight: 750; letter-spacing: -1.5px; }
+    .unit { margin-left: 5px; font-size: 15px; font-weight: 500; color: var(--muted); }
+    .graph-area { position: relative; height: 200px; width: 100%; }
+    #chart { display: block; width: 100%; height: 100%; }
+    .legend { display: flex; gap: 17px; align-items: center; color: var(--muted); font-size: 12px; }
+    .legend span::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor; margin-right: 7px; vertical-align: 1px; }
+    .progress-head { margin-bottom: 10px; gap: 10px; }
+    .progress-track { height: 8px; background: #26364a; border-radius: 8px; overflow: hidden; }
+    #progress-fill { width: 0; height: 100%; background: linear-gradient(90deg, #347ab7, #62b7ff);
+      border-radius: 8px; transition: width .25s ease; }
+    .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+    .fact span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+    .fact strong { font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .toolbar { flex-wrap: wrap; gap: 8px; }
+    button { font: inherit; font-size: 12px; font-weight: 680; cursor: pointer; color: var(--text);
+      border: 1px solid #354c65; padding: 10px 14px; border-radius: 8px; background: #25364b;
+      transition: background .1s ease, border-color .1s ease; }
+    button:hover:not(:disabled) { background: #31465e; border-color: #4d7196; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    button:disabled { cursor: not-allowed; opacity: .35; }
+    button.primary { background: #22689b; border-color: #3389c5; }
+    button.primary:hover:not(:disabled) { background: #2981bc; }
+    button.danger { color: #ffc5ca; border-color: #68404a; background: #3d2630; }
+    button.danger:hover:not(:disabled) { background: #5b303d; }
+    .smallbutton { padding: 7px 10px; font-size: 11px; }
+    .toggle { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 7px; cursor: pointer; }
+    .toggle input { accent-color: var(--blue); }
+    .row { gap: 10px; flex-wrap: wrap; }
+    .fieldline { gap: 8px; margin-bottom: 9px; }
+    .fieldline label { font-size: 11px; color: var(--muted); }
+    input[type="text"], textarea { width: 100%; border-radius: 8px; padding: 10px;
+      color: var(--text); background: var(--panel-deep); border: 1px solid var(--border);
+      font: 12px ui-monospace, Consolas, monospace; }
+    textarea { min-height: 79px; resize: vertical; }
+    pre { margin: 0; font: 11px/1.55 ui-monospace, Consolas, monospace; color: #b9cbe0;
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+    .codepane { padding: 12px; border: 1px solid var(--border); background: var(--panel-deep);
+      border-radius: 9px; max-height: 245px; overflow: auto; }
+    .log { min-height: 130px; max-height: 250px; }
+    .pill { color: var(--muted); font-size: 11px; }
+    .footnote { color: var(--muted); font-size: 11px; line-height: 1.6; margin-top: 12px; }
+    @media (max-width: 790px) {
+      .layout { grid-template-columns: minmax(0, 1fr); }
+      .shell { padding: 14px; }
+      .panel { padding: 15px; }
+      .value { font-size: 27px; }
+      .topbar { align-items: flex-start; }
+    }
+    @media (max-width: 420px) { .metrics { gap: 8px; } .metric { padding: 12px; } .value { font-size: 23px; } }
+  </style>
 </head>
 <body>
-    <main class="container">
-        <h1>Taurino</h1>
-        <p class="subtitle">
-            JavaScript ↔ Rust ↔ Python Command Playground
-        </p>
-        <section class="card">
-            <div class="status">
-                <span class="dot" id="status-dot"></span>
-                <span id="status-text">Checking Taurino API...</span>
-            </div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">T</div>
+        <div><h1>Taurino Measurement</h1><p class="subtitle">Python / multiprocessing / Rust / Wry</p></div>
+      </div>
+      <div class="connection" role="status" aria-live="polite">
+        <span id="connection-dot" class="dot"></span>
+        <span id="connection-text">Verbinde mit Backend...</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <div class="stack">
+        <section class="panel">
+          <p class="eyebrow">Machine Control</p>
+          <div class="state-title">
+            <strong id="state-name">--</strong>
+            <span id="state-chip" class="chip">Warte auf Daten</span>
+          </div>
+          <p class="muted" id="state-explanation" style="margin-top:9px">Lese den Maschinenzustand...</p>
+          <div class="toolbar" style="margin-top:21px">
+            <button id="start-btn" class="primary" disabled>Start</button>
+            <button id="pause-btn" disabled>Pause</button>
+            <button id="resume-btn" disabled>Fortsetzen</button>
+            <button id="stop-btn" disabled>Stop</button>
+            <button id="cancel-btn" class="danger" disabled>Abbrechen</button>
+          </div>
+          <p class="footnote">Die Buttons entsprechen den erlaubten Zustandswechseln im Python-Backend.
+            INIT wird nach etwa 10 Sekunden zu READY. Die eigentliche Messung wird vom Worker simuliert.</p>
         </section>
-        <section class="card">
-            <h3>Invoke Command</h3>
-            <div class="field">
-                <label for="command">Command</label>
-                <input
-                    id="command"
-                    value="greet"
-                    spellcheck="false"
-                >
-            </div>
-            <div class="field">
-                <label for="payload">Payload (JSON)</label>
-                <textarea id="payload" spellcheck="false">{
-    "name": "Taurino"
-}</textarea>
-            </div>
-            <div class="buttons">
-                <button id="invoke-btn">
-                    Invoke
-                </button>
-                <button id="greet-btn" class="secondary">
-                    Test Greet
-                </button>
-                <button id="clear-btn" class="secondary">
-                    Clear
-                </button>
-            </div>
+
+        <div class="metrics">
+          <section class="metric">
+            <div class="stat-top"><span>Strom</span><span class="color-i">I</span></div>
+            <div class="value"><span id="current-value">--</span><span class="unit">A</span></div>
+          </section>
+          <section class="metric">
+            <div class="stat-top"><span>Spannung</span><span class="color-u">U</span></div>
+            <div class="value"><span id="voltage-value">--</span><span class="unit">V</span></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Live-Messwerte</h2>
+            <div class="legend"><span class="color-i">Strom (A)</span><span class="color-u">Spannung (V)</span></div>
+          </div>
+          <div class="graph-area"><canvas id="chart" aria-label="Live-Verlauf von Strom und Spannung" role="img"></canvas></div>
+          <div class="row" style="justify-content:space-between;margin-top:10px">
+            <label class="toggle"><input id="auto-poll" type="checkbox" checked> Auto-Refresh (500 ms)</label>
+            <div class="row"><span class="pill" id="sample-count">0 Samples</span>
+              <button id="refresh-btn" class="smallbutton">Jetzt aktualisieren</button></div>
+          </div>
         </section>
-        <section class="card">
-            <h3>Response</h3>
-            <pre id="response">No response yet.</pre>
+
+        <section class="panel">
+          <div class="progress-head"><h2 style="font-size:14px">Messfortschritt</h2><strong id="progress-label">0 %</strong></div>
+          <div class="progress-track" role="progressbar" id="progress-track" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="progress-fill"></div>
+          </div>
+          <div class="facts">
+            <div class="fact"><span>Messdauer (konfiguriert)</span><strong id="duration">--</strong></div>
+            <div class="fact"><span>Messzeit (Worker)</span><strong id="time-p">--</strong></div>
+            <div class="fact"><span>U min / max</span><strong id="voltage-range">--</strong></div>
+            <div class="fact"><span>U Schritt</span><strong id="voltage-step">--</strong></div>
+          </div>
         </section>
-        <section class="card">
-            <h3>Python -> JavaScript Events</h3>
-            <p class="hint">
-                Beim Laden werden <code>listen("status")</code> und
-                <code>once("ready")</code> automatisch registriert.
-                Python kann danach Events an diese WebView senden.
-            </p>
-            <div class="buttons">
-                <button id="listen-start-btn">Listen status</button>
-                <button id="listen-stop-btn" class="secondary">Unlisten status</button>
-                <button id="once-start-btn" class="secondary">Arm once ready</button>
-                <button id="events-clear-btn" class="secondary">Clear events</button>
-            </div>
-            <p class="event-count" id="listener-state">Listeners not initialized</p>
-            <p class="event-count" id="event-count">Events received: 0</p>
-            <pre class="event-log" id="event-log">No events received yet.</pre>
-            <label>Python: nach dem Registrieren der JavaScript-Listener ausfuehren</label>
-            <pre class="code-example">await app.emit("status", {"message": "Hallo von Python"})
-await app.emit("status", {"percent": 50})
-await app.emit("ready", {"success": True})
-await app.emit("ready", {"success": True})  # once ignores this</pre>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-heading"><h2>Messdaten / ImpData</h2><span class="pill" id="last-update">Noch kein Abruf</span></div>
+          <div class="facts" style="margin-top:0">
+            <div class="fact"><span>Dateiname</span><strong id="file-name">--</strong></div>
+            <div class="fact"><span>Probe</span><strong id="probe-number">--</strong></div>
+            <div class="fact"><span>Firmware</span><strong id="firmware">--</strong></div>
+            <div class="fact"><span>Seriennummer</span><strong id="serial">--</strong></div>
+            <div class="fact"><span>Modus</span><strong id="mode">--</strong></div>
+            <div class="fact"><span>Fehlercode</span><strong id="error-code">--</strong></div>
+          </div>
+          <div class="footnote" id="comments">--</div>
         </section>
-        <section class="card">
-            <h3>Runtime Metadata</h3>
-            <pre id="metadata">Loading...</pre>
+
+        <section class="panel">
+          <div class="panel-heading"><h2>RPC Playground</h2><span class="pill">JavaScript - Rust - Python</span></div>
+          <div class="fieldline"><label for="rpc-command">Command</label></div>
+          <input type="text" id="rpc-command" value="get_measurement" spellcheck="false">
+          <div class="fieldline" style="margin-top:11px"><label for="rpc-arguments">Payload (JSON-Objekt)</label></div>
+          <textarea id="rpc-arguments" spellcheck="false">{}</textarea>
+          <div class="toolbar" style="margin-top:12px"><button id="rpc-send-btn">Invoke</button>
+            <button id="rpc-clear-btn" class="smallbutton">Leeren</button></div>
+          <div class="codepane" style="margin-top:12px;max-height:160px"><pre id="rpc-result">Noch kein RPC ausgefuehrt.</pre></div>
         </section>
-    </main>
-    <script>
-        (() => {
-            "use strict";
-            const $ = (id) => document.getElementById(id);
-            const internals =
-                window.__TAURINO_INTERNALS__;
-            const invokeButton = $("invoke-btn");
-            const responseElement = $("response");
-            const eventLogElement = $("event-log");
-            const eventHistory = [];
-            let eventCount = 0;
-            let unlistenStatus = null;
-            let unlistenReady = null;
 
-            function addEventLog(kind, value) {
-                const entry = {
-                    time: new Date().toLocaleTimeString(),
-                    kind,
-                    value
-                };
-                eventHistory.push(entry);
-                if (eventHistory.length > 50) eventHistory.shift();
-                eventLogElement.textContent = eventHistory
-                    .map((item) =>
-                        `[${item.time}] ${item.kind}: ${format(item.value)}`
-                    )
-                    .join("\n\n");
-                eventLogElement.scrollTop = eventLogElement.scrollHeight;
-                if (kind === "status" || kind === "ready") {
-                    eventCount++;
-                    $("event-count").textContent = `Events received: ${eventCount}`;
-                }
-            }
+        <section class="panel">
+          <div class="panel-heading"><h2>Aktueller State (JSON)</h2><button id="copy-json-btn" class="smallbutton">Kopieren</button></div>
+          <div class="codepane"><pre id="raw-state">Noch keine Messdaten.</pre></div>
+        </section>
 
-            function updateListenerControls() {
-                const available =
-                    typeof internals?.listen === "function" &&
-                    typeof internals?.once === "function";
-                $("listen-start-btn").disabled = !available || !!unlistenStatus;
-                $("listen-stop-btn").disabled = !available || !unlistenStatus;
-                $("once-start-btn").disabled = !available || !!unlistenReady;
-                $("listener-state").textContent = available
-                    ? `status: ${unlistenStatus ? "listening" : "inactive"} | ` +
-                      `ready: ${unlistenReady ? "armed (once)" : "inactive"}`
-                    : "Taurino Event API unavailable";
-            }
+        <section class="panel">
+          <div class="panel-heading"><h2>Ereignisprotokoll</h2><button id="clear-log-btn" class="smallbutton">Leeren</button></div>
+          <div class="codepane log" id="event-log" role="log" aria-live="polite"><pre>Warte auf Backend...</pre></div>
+        </section>
 
-            function startStatusListener() {
-                if (unlistenStatus || typeof internals?.listen !== "function") return;
-                unlistenStatus = internals.listen("status", ({ payload }) => {
-                    addEventLog("status", payload);
-                    console.log("[Taurino] status event:", payload);
-                });
-                updateListenerControls();
-            }
+        <section class="panel">
+          <div class="panel-heading"><h2>Runtime Metadata</h2></div>
+          <div class="codepane"><pre id="runtime-metadata">Nicht verfuegbar.</pre></div>
+        </section>
+      </div>
+    </div>
+  </main>
 
-            function stopStatusListener() {
-                if (unlistenStatus) {
-                    unlistenStatus();
-                    unlistenStatus = null;
-                }
-                updateListenerControls();
-            }
+  <script>
+    (() => {
+      "use strict";
 
-            function armReadyOnce() {
-                if (unlistenReady || typeof internals?.once !== "function") return;
-                unlistenReady = internals.once("ready", ({ payload }) => {
-                    // The native once listener is removed before this handler returns.
-                    unlistenReady = null;
-                    addEventLog("ready", payload);
-                    console.log("[Taurino] ready event (once):", payload);
-                    updateListenerControls();
-                });
-                updateListenerControls();
-            }
-            function format(value) {
-                if (typeof value === "string") {
-                    return value;
-                }
-                return JSON.stringify(value, null, 2);
-            }
-            function showResponse(type, value) {
-                responseElement.className = type;
-                responseElement.textContent = format(value);
-            }
-            function updateStatus() {
-                const available =
-                    typeof internals?.invoke === "function" &&
-                    typeof window.ipc?.postMessage === "function";
-                $("status-dot").classList.toggle(
-                    "connected",
-                    available
-                );
-                $("status-text").textContent = available
-                    ? "Taurino API available"
-                    : "Taurino API unavailable";
-                invokeButton.disabled = !available;
-                $("greet-btn").disabled = !available;
-            }
-            async function executeCommand(command, payload = {}) {
-                if (typeof internals?.invoke !== "function") {
-                    showResponse("error", {
-                        message: "Taurino invoke API unavailable"
-                    });
-                    return;
-                }
-                invokeButton.disabled = true;
-                showResponse("info", {
-                    status: "pending",
-                    command,
-                    payload
-                });
-                const start = performance.now();
-                try {
-                    const result = await internals.invoke(
-                        command,
-                        payload
-                    );
-                    showResponse("success", {
-                        status: "success",
-                        command,
-                        durationMs: Number(
-                            (performance.now() - start).toFixed(2)
-                        ),
-                        data: result
-                    });
-                    console.log(
-                        "[Taurino] Command result:",
-                        result
-                    );
-                } catch (error) {
-                    showResponse("error", {
-                        status: "error",
-                        command,
-                        durationMs: Number(
-                            (performance.now() - start).toFixed(2)
-                        ),
-                        error
-                    });
-                    console.error(
-                        "[Taurino] Command failed:",
-                        error
-                    );
-                } finally {
-                    updateStatus();
-                }
-            }
-            invokeButton.addEventListener("click", () => {
-                const command = $("command").value.trim();
-                if (!command) {
-                    showResponse("error", {
-                        message: "Command name is required"
-                    });
-                    return;
-                }
-                let payload;
-                try {
-                    payload = JSON.parse($("payload").value);
-                    if (
-                        payload === null ||
-                        typeof payload !== "object" ||
-                        Array.isArray(payload)
-                    ) {
-                        throw new Error(
-                            "Payload must be a JSON object"
-                        );
-                    }
-                } catch (error) {
-                    showResponse("error", {
-                        message: "Invalid JSON payload",
-                        details: String(error)
-                    });
-                    return;
-                }
-                executeCommand(command, payload);
-            });
-            $("greet-btn").addEventListener("click", () => {
-                executeCommand("greet", {
-                    name: "Taurino"
-                });
-            });
-            $("clear-btn").addEventListener("click", () => {
-                showResponse("", "No response yet.");
-            });
-            $("listen-start-btn").addEventListener("click", startStatusListener);
-            $("listen-stop-btn").addEventListener("click", stopStatusListener);
-            $("once-start-btn").addEventListener("click", armReadyOnce);
-            $("events-clear-btn").addEventListener("click", () => {
-                eventHistory.length = 0;
-                eventCount = 0;
-                eventLogElement.textContent = "No events received yet.";
-                $("event-count").textContent = "Events received: 0";
-            });
+      const $ = (id) => document.getElementById(id);
+      const bridge = window.__TAURINO_INTERNALS__ ?? null;
+      const MAX_SAMPLES = 90;
+      const POLL_MS = 500;
+      const samples = [];
+      const history = [];
+      const labels = {
+        INIT: "Initialisierung des Workers...",
+        READY: "Bereit. Du kannst die Messung starten.",
+        RUNNING: "Startphase des Messprozesses...",
+        MEASURING: "Messprozess aktiv.",
+        PAUSE: "Pausiert. Fortsetzen, Stop oder Abbrechen moeglich.",
+        STOP: "Messung beendet. Worker wechselt zu READY.",
+        CANCEL: "Abbruch angefordert. Worker wechselt zu READY."
+      };
 
-            // Listen immediately. Python must send only after the page has loaded.
-            startStatusListener();
-            armReadyOnce();
+      let latest = null;
+      let connected = false;
+      let controlBusy = false;
+      let pollBusy = false;
+      let pollTimer = null;
+      let disposed = false;
 
-            // Metadata provided by Rust initialization scripts.
-            $("metadata").textContent = format(
-                internals?.metadata ?? {
-                    available: false
-                }
-            );
-            updateStatus();
-        })();
-    </script>
+      const hasBridge = () => typeof bridge?.invoke === "function" && typeof window.ipc?.postMessage === "function";
+      const number = (value, fallback = 0) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      };
+      const numText = (value, digits = 2) => number(value).toFixed(digits);
+      const formatJson = (value) => {
+        try { return JSON.stringify(value, null, 2) ?? String(value); }
+        catch { return String(value); }
+      };
+      const errorText = (error) => error?.message ?? formatJson(error);
+      const localTime = () => new Date().toLocaleTimeString("de-DE");
+
+      function log(kind, message, details = null) {
+        const entry = `[${localTime()}] ${kind}: ${message}` + (details === null ? "" : `\n${formatJson(details)}`);
+        history.unshift(entry);
+        if (history.length > 60) history.pop();
+        $("event-log").replaceChildren();
+        const pre = document.createElement("pre");
+        pre.textContent = history.join("\n\n");
+        $("event-log").append(pre);
+      }
+
+      function connectionState(ok, text) {
+        connected = ok;
+        $("connection-dot").className = `dot ${ok ? "ok" : "fail"}`;
+        $("connection-text").textContent = text;
+        updateButtons();
+      }
+
+      function updateButtons() {
+        const state = latest?.STATE_NAME;
+        const ready = connected && !controlBusy;
+        $("start-btn").disabled = !(ready && state === "READY");
+        $("pause-btn").disabled = !(ready && state === "MEASURING");
+        $("resume-btn").disabled = !(ready && state === "PAUSE");
+        $("stop-btn").disabled = !(ready && state === "MEASURING");
+        $("cancel-btn").disabled = !(ready && state === "MEASURING");
+        $("rpc-send-btn").disabled = !hasBridge() || controlBusy;
+        $("refresh-btn").disabled = !hasBridge() || pollBusy;
+      }
+
+      function drawChart() {
+        const canvas = $("chart");
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const box = canvas.getBoundingClientRect();
+        const width = Math.max(200, Math.floor(box.width));
+        const height = Math.max(120, Math.floor(box.height));
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, width, height);
+        const pad = { left: 30, right: 12, top: 12, bottom: 22 };
+        const innerW = width - pad.left - pad.right;
+        const innerH = height - pad.top - pad.bottom;
+        const maximum = Math.max(10, ...samples.flatMap((p) => [p.I, p.U]));
+        const yMax = Math.ceil(maximum / 5) * 5;
+        ctx.font = "11px ui-monospace, Consolas, monospace";
+        ctx.lineWidth = 1;
+        for (let tick = 0; tick <= 4; tick++) {
+          const y = pad.top + (tick / 4) * innerH;
+          ctx.strokeStyle = "#273a50";
+          ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+          ctx.fillStyle = "#8da4bd";
+          ctx.fillText(String(Math.round(yMax * (4 - tick) / 4)), 3, y + 3);
+        }
+        const x = (index) => pad.left + (index / Math.max(1, MAX_SAMPLES - 1)) * innerW;
+        const y = (value) => pad.top + innerH * (1 - value / Math.max(1, yMax));
+        for (const [key, color] of [["I", "#61afff"], ["U", "#54d6a0"]]) {
+          if (!samples.length) continue;
+          ctx.beginPath();
+          samples.forEach((p, index) => index === 0 ? ctx.moveTo(x(index), y(p[key])) : ctx.lineTo(x(index), y(p[key])));
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.lineJoin = "round";
+          ctx.stroke();
+          const last = samples[samples.length - 1];
+          ctx.beginPath(); ctx.arc(x(samples.length - 1), y(last[key]), 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.fill();
+        }
+        ctx.fillStyle = "#8da4bd";
+        ctx.fillText("Live / letzte 90 Abrufe", pad.left + 3, height - 4);
+      }
+
+      function render(data) {
+        latest = data;
+        const state = typeof data.STATE_NAME === "string" ? data.STATE_NAME : "UNKNOWN";
+        $("state-name").textContent = state;
+        $("state-explanation").textContent = labels[state] ?? "Unbekannter Maschinenzustand.";
+        $("state-chip").textContent = `SM = ${data.STATE_MACHINE ?? "?"}`;
+        $("state-chip").className = "chip " + (
+          state === "READY" ? "ready" :
+          state === "MEASURING" || state === "RUNNING" ? "active" :
+          state === "PAUSE" || state === "INIT" ? "pause" :
+          state === "CANCEL" ? "error" : ""
+        );
+        $("current-value").textContent = numText(data.I);
+        $("voltage-value").textContent = numText(data.U);
+        const progress = Math.max(0, Math.min(100, number(data.PROGRESS)));
+        $("progress-label").textContent = `${numText(progress, 1)} %`;
+        $("progress-fill").style.width = `${progress}%`;
+        $("progress-track").setAttribute("aria-valuenow", String(progress));
+        $("duration").textContent = `${numText(number(data.T_MEAS) / 1000, 1)} s`;
+        $("time-p").textContent = `${numText(number(data.TIME_P) / 1000, 1)} s`;
+        $("voltage-range").textContent = `${numText(data.U_MIN, 1)} / ${numText(data.U_MAX, 1)} V`;
+        $("voltage-step").textContent = `${numText(data.DELTA_U, 2)} V`;
+        $("file-name").textContent = String(data.FILE_NAME ?? "--");
+        $("probe-number").textContent = String(data.PROBE_NR ?? "--");
+        $("firmware").textContent = String(data.FIRMWARE ?? "--");
+        $("serial").textContent = String(data.SIG_SN ?? "--");
+        $("mode").textContent = String(data.MODUS ?? "--");
+        $("error-code").textContent = String(data.ERROR ?? "--");
+        $("comments").textContent = `Kommentar: ${String(data.COMMENTS ?? "--")}`;
+        $("raw-state").textContent = formatJson(data);
+        $("last-update").textContent = `Letzter Abruf ${localTime()}`;
+        samples.push({ I: number(data.I), U: number(data.U) });
+        if (samples.length > MAX_SAMPLES) samples.shift();
+        $("sample-count").textContent = `${samples.length} Samples`;
+        drawChart();
+        updateButtons();
+      }
+
+      async function readSnapshot() {
+        if (!hasBridge()) {
+          connectionState(false, "Taurino Bridge nicht verfuegbar");
+          return;
+        }
+        if (pollBusy || disposed) return;
+        pollBusy = true;
+        updateButtons();
+        try {
+          const data = await bridge.invoke("get_measurement", {});
+          if (!data || typeof data !== "object" || Array.isArray(data)) {
+            throw new TypeError("get_measurement returned invalid data");
+          }
+          if (!connected) log("IPC", "get_measurement erfolgreich verbunden");
+          connectionState(true, "Python / Rust verbunden");
+          render(data);
+        } catch (error) {
+          if (connected) log("IPC ERROR", "Messdaten konnten nicht gelesen werden", errorText(error));
+          connectionState(false, "Backend nicht erreichbar");
+        } finally {
+          pollBusy = false;
+          updateButtons();
+        }
+      }
+
+      async function command(name, payload) {
+        if (!hasBridge() || controlBusy) return;
+        controlBusy = true;
+        updateButtons();
+        try {
+          const result = await bridge.invoke(name, payload);
+          if (result === false) {
+            log("REJECTED", `${name} vom Backend abgelehnt`, payload);
+          } else {
+            log("OK", `${name} ausgefuehrt`, result);
+          }
+          await readSnapshot();
+          return result;
+        } catch (error) {
+          log("ERROR", `${name} fehlgeschlagen`, errorText(error));
+          throw error;
+        } finally {
+          controlBusy = false;
+          updateButtons();
+        }
+      }
+
+      async function runPlayground() {
+        const name = $("rpc-command").value.trim();
+        if (!name) { $("rpc-result").textContent = "Fehler: Command-Name fehlt."; return; }
+        let payload;
+        try {
+          payload = JSON.parse($("rpc-arguments").value);
+          if (payload === null || Array.isArray(payload) || typeof payload !== "object") {
+            throw new Error("Payload muss ein JSON-Objekt sein");
+          }
+        } catch (error) {
+          $("rpc-result").textContent = `Ungueltiges JSON: ${errorText(error)}`;
+          return;
+        }
+        if (!hasBridge()) { $("rpc-result").textContent = "Taurino Bridge nicht verfuegbar."; return; }
+        $("rpc-result").textContent = "RPC wird ausgefuehrt...";
+        try {
+          const result = await bridge.invoke(name, payload);
+          $("rpc-result").textContent = formatJson(result);
+          log("RPC", `${name} erfolgreich`, result);
+          if (["start_measurement", "set_machine_state"].includes(name)) await readSnapshot();
+        } catch (error) {
+          $("rpc-result").textContent = `Fehler: ${errorText(error)}`;
+          log("RPC ERROR", name, errorText(error));
+        }
+      }
+
+      function schedulePoll() {
+        if (disposed) return;
+        clearTimeout(pollTimer);
+        if (!$("auto-poll").checked) return;
+        pollTimer = setTimeout(async () => {
+          try { await readSnapshot(); }
+          finally { schedulePoll(); }
+        }, POLL_MS);
+      }
+
+      // Commands available in examples.basic: get_measurement, start_measurement, set_machine_state.
+      $("start-btn").addEventListener("click", () => { void command("start_measurement", {}).catch(() => {}); });
+      for (const action of ["pause", "resume", "stop", "cancel"]) {
+        $(action + "-btn").addEventListener("click", () => {
+          void command("set_machine_state", { action }).catch(() => {});
+        });
+      }
+      $("refresh-btn").addEventListener("click", () => { void readSnapshot(); });
+      $("auto-poll").addEventListener("change", () => {
+        if ($("auto-poll").checked) { void readSnapshot().finally(schedulePoll); }
+        else clearTimeout(pollTimer);
+      });
+      $("rpc-send-btn").addEventListener("click", () => { void runPlayground(); });
+      $("rpc-clear-btn").addEventListener("click", () => { $("rpc-result").textContent = "Noch kein RPC ausgefuehrt."; });
+      $("clear-log-btn").addEventListener("click", () => { history.length = 0; $("event-log").textContent = "Protokoll geleert."; });
+      $("copy-json-btn").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(formatJson(latest)); log("UI", "State JSON kopiert"); }
+        catch (error) { log("UI ERROR", "Kopieren nicht moeglich", errorText(error)); }
+      });
+      window.addEventListener("resize", drawChart);
+      window.addEventListener("pagehide", () => { disposed = true; clearTimeout(pollTimer); });
+
+      $("runtime-metadata").textContent = formatJson(bridge?.metadata ?? { available: false });
+      drawChart();
+      updateButtons();
+      void readSnapshot().finally(schedulePoll);
+    })();
+  </script>
 </body>
 </html>
-"#;
+"###;

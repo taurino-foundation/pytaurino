@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, overload
+from typing import Any, Self
 
 from taurino.app import App
 
@@ -11,71 +11,87 @@ Hook = Callable[..., Any]
 
 
 class Builder:
-    def __init__(self):
+    def __init__(self) -> None:
         self._setup_hook: Hook | None = None
-        self._event_loop_hook: Hook | None = None
+
+        self._loop_event_hook: Hook | None = None
+        self._window_event_hook: Hook | None = None
+        self._webview_event_hook: Hook | None = None
+        self._systemtray_event_hook: Hook | None = None
+        self._shortcut_event_hook: Hook | None = None
+
         self._commands: dict[str, Hook] = {}
         self._built = False
 
-    def command(self, name: str | None = None) -> Callable[[Hook], Hook]:
-        """Register a command without exposing the CommandRegistry."""
+    def _ensure_mutable(self) -> None:
+        if self._built:
+            raise RuntimeError("Builder is already built")
 
+    def _register_hook(self, attribute: str, hook: Hook) -> Self:
+        self._ensure_mutable()
+
+        if not callable(hook):
+            raise TypeError(f"{attribute} must be callable")
+
+        if getattr(self, attribute) is not None:
+            raise RuntimeError(f"{attribute} already registered")
+
+        setattr(self, attribute, hook)
+        return self
+
+    def setup(self, hook: Hook) -> Self:
+        return self._register_hook("_setup_hook", hook)
+
+    def on_loop_event(self, hook: Hook) -> Self:
+        return self._register_hook("_loop_event_hook", hook)
+
+    def on_window_event(self, hook: Hook) -> Self:
+        return self._register_hook("_window_event_hook", hook)
+
+    def on_webview_event(self, hook: Hook) -> Self:
+        return self._register_hook("_webview_event_hook", hook)
+
+    def on_systemtray_event(self, hook: Hook) -> Self:
+        return self._register_hook("_systemtray_event_hook", hook)
+
+    def on_shortcut_event(self, hook: Hook) -> Self:
+        return self._register_hook("_shortcut_event_hook", hook)
+
+    def command(
+        self,
+        name: str | None = None,
+    ) -> Callable[[Hook], Hook]:
         def decorator(fn: Hook) -> Hook:
-            if self._built:
-                raise RuntimeError("Builder is already built")
-            command_name = name or fn.__name__
+            self._ensure_mutable()
+
+            if not callable(fn):
+                raise TypeError("Command must be callable")
+
+            command_name = name if name is not None else fn.__name__
+
+            if not isinstance(command_name, str) or not command_name.strip():
+                raise ValueError("Command name cannot be empty")
+
             if command_name in self._commands:
                 raise ValueError(f"Duplicate command: {command_name}")
+
             self._commands[command_name] = fn
             return fn
 
         return decorator
 
-    @overload
-    def setup(self, hook: Hook) -> Hook: ...
-
-    @overload
-    def setup(self) -> Callable[[Hook], Hook]: ...
-
-    def setup(self, hook: Hook | None = None) -> Hook | Callable[[Hook], Hook]:
-        def register(fn: Hook) -> Hook:
-            if self._built or self._setup_hook is not None or not callable(fn):
-                raise RuntimeError("Setup hook already registered, invalid, or builder is built")
-            self._setup_hook = fn
-            return fn
-
-        return register(hook) if hook is not None else register
-
-    @overload
-    def on_event(self, hook: Hook) -> Hook: ...
-
-    @overload
-    def on_event(self) -> Callable[[Hook], Hook]: ...
-
-    def on_event(self, hook: Hook | None = None) -> Hook | Callable[[Hook], Hook]:
-        def register(fn: Hook) -> Hook:
-            if self._built or self._event_loop_hook is not None or not callable(fn):
-                raise RuntimeError(
-                    "Event-loop hook already registered, invalid, or builder is built"
-                )
-            self._event_loop_hook = fn
-            return fn
-
-        return register(hook) if hook is not None else register
-
-    # Alias to match the original pasted Builder.run event-hook decorator.
-    run = on_event
-
     def build(self) -> App:
-        """Build exactly one App; native bridge target is optional but must exist at runtime."""
-        from .app import App
+        self._ensure_mutable()
 
-        if self._built:
-            raise RuntimeError("Builder already used")
         app = App(
             commands=dict(self._commands),
             setup_hook=self._setup_hook,
-            event_hook=self._event_loop_hook,
+            loop_event_hook=self._loop_event_hook,
+            window_event_hook=self._window_event_hook,
+            webview_event_hook=self._webview_event_hook,
+            systemtray_event_hook=self._systemtray_event_hook,
+            shortcut_event_hook=self._shortcut_event_hook,
         )
+
         self._built = True
         return app

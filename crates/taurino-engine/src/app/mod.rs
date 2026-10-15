@@ -11,17 +11,12 @@ use {
     },
     anyhow::Result,
     pyo3::{Py, PyAny, Python},
-    std::{
-        collections::HashMap,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
+    std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     },
     taurino_aio::IpcClient,
-    taurino_config::{
-        Config, EngineLoop, EngineLoopBuilder, EventLoopMessage, dispatcher::PendingInvoke, webview::WebContextStore,
-    },
+    taurino_config::{Config, EngineLoop, EngineLoopBuilder, EventLoopMessage, webview::WebContextStore},
 };
 
 #[allow(dead_code)]
@@ -70,8 +65,13 @@ impl Runtime {
         // transferred into EngineEventHandler.
         let manager = self.manager.clone();
         let config = manager.config()?;
+        let app_config = config.app_config();
         let target = &self.event_loop;
 
+        for window_options in &app_config.windows {
+            let mut window_manager = manager.window_manager()?;
+            window_manager.open_window(window_options, target)?;
+        }
         // application lifecycle behavior for incoming Tao events.
 
         let mut event_handler = EventHandler::new(self.manager);
@@ -83,19 +83,9 @@ impl Runtime {
         // From this point onward, application lifecycle changes should normally
         // be driven by events rather than by direct calls from external threads.
 
-        /*         let mut pending = HashMap::<u16, PendingInvoke>::new();
-        let mut next_request_id = 0_u16;
-        let mut ipc_connected = true; */
         let mut main_loop = self.event_loop;
         let exit_code = main_loop.run_return(move |event, target, control_flow| {
-            event_handler.handle_event(
-                /*                 &mut pending,
-                &mut next_request_id,
-                &mut ipc_connected, */
-                event,
-                target,
-                control_flow,
-            );
+            event_handler.handle_event(event, target, control_flow);
         });
         self.watcher_running.store(false, Ordering::Release);
         if self.watcher.join().is_err() {

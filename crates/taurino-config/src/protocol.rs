@@ -22,3 +22,11 @@ pub struct InvokeResponse {
     pub ok: bool,
     pub data: Value,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationTarget {
+    pub webview_label: String,
+
+    #[serde(default)]
+    pub window_label: Option<String>,
+}

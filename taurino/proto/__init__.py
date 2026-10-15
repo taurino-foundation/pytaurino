@@ -223,9 +223,7 @@ class UserAttentionInformational(SerdeModel):
     type: Literal["Informational"] = "Informational"
 
 
-UserAttentionType = Annotated[
-    UserAttentionCritical | UserAttentionInformational, Field(discriminator="type")
-]
+UserAttentionType = Annotated[UserAttentionCritical | UserAttentionInformational, Field(discriminator="type")]
 
 
 class DeviceEventsAlways(SerdeModel):
@@ -310,11 +308,7 @@ class BlockListNavigation(SerdeModel):
 
 
 NavigationPolicy = Annotated[
-    AllowAllNavigation
-    | DenyAllNavigation
-    | SameOriginNavigation
-    | AllowListNavigation
-    | BlockListNavigation,
+    AllowAllNavigation | DenyAllNavigation | SameOriginNavigation | AllowListNavigation | BlockListNavigation,
     Field(discriminator="type"),
 ]
 
@@ -340,9 +334,7 @@ class CreateWindowAction(SerdeModel):
     window: WindowConfig
 
 
-NewWindowAction = Annotated[
-    AllowWindowAction | DenyWindowAction | CreateWindowAction, Field(discriminator="type")
-]
+NewWindowAction = Annotated[AllowWindowAction | DenyWindowAction | CreateWindowAction, Field(discriminator="type")]
 
 
 class NewWindowRule(SerdeModel):
@@ -364,9 +356,7 @@ class RulesNewWindow(SerdeModel):
     fallback: NewWindowAction = Field(default_factory=DenyWindowAction)
 
 
-NewWindowPolicy = Annotated[
-    AllowNewWindow | DenyNewWindow | RulesNewWindow, Field(discriminator="type")
-]
+NewWindowPolicy = Annotated[AllowNewWindow | DenyNewWindow | RulesNewWindow, Field(discriminator="type")]
 
 
 class PermissionRequestPolicy(SerdeModel):
@@ -485,9 +475,7 @@ class WebViewConfig(SerdeModel):
     allow_link_preview: bool = True
     disable_input_accessory_view: bool = False
     data_directory: str | None = None
-    data_store_identifier: (
-        tuple[U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8] | None
-    ) = None
+    data_store_identifier: tuple[U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8, U8] | None = None
     scroll_bar_style: ScrollBarStyle = ScrollBarStyle.DEFAULT
     limit_navigations_to_app_bound_domains: bool = False
     activity_name: str | None = None

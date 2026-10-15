@@ -90,6 +90,18 @@ class InvokeResponse(BaseModel):
         return packed
 
 
+class CommandEnvelope(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    cmd: str
+    window_label: str = Field(min_length=1)
+    webview_label: str = Field(min_length=1)
+    request: InvokeRequest
+
+
 class CommandErrorCode(StrEnum):
     NO_HANDLER = "NO_HANDLER"
     INVALID_PARAMS = "INVALID_PARAMS"
@@ -240,9 +252,7 @@ class CommandRegistry:
             name: {
                 "handler": f"{compiled.func.__module__}.{compiled.func.__qualname__}",
                 "async": inspect.iscoroutinefunction(compiled.func),
-                "params": (
-                    list(compiled.validator.model_fields) if compiled.validator is not None else []
-                ),
+                "params": (list(compiled.validator.model_fields) if compiled.validator is not None else []),
                 "injected": list(compiled.injections),
             }
             for name, compiled in self._handlers.items()
@@ -265,9 +275,7 @@ class CommandRegistry:
                 inspect.Parameter.KEYWORD_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             ):
-                raise TypeError(
-                    "Commands only accept named arguments, not positional-only, *args or **kwargs"
-                )
+                raise TypeError("Commands only accept named arguments, not positional-only, *args or **kwargs")
 
             hinted = hints.get(name, Any)
             dependency = False
@@ -407,9 +415,7 @@ class CommandRegistry:
 
         for hook in self._after:
             try:
-                await self._invoke_hook(
-                    hook, request.cmd, payload, response.model_dump(mode="json")
-                )
+                await self._invoke_hook(hook, request.cmd, payload, response.model_dump(mode="json"))
             except Exception:
                 log.exception("Command after-hook failed")
 

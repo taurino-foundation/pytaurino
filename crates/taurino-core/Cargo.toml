@@ -6,6 +6,8 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
 serde.workspace = true
 wry.workspace = true
 tao.workspace = true

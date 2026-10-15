@@ -52,5 +52,5 @@ impl RuntimeManager {
         lock_state(&self.context, "WebContextStore")
     }
 
-    pub fn window(&self) -> Result<MutexGuard<'_, WindowManager>> { lock_state(&self._window, "WindowManager") }
+    pub fn window_manager(&self) -> Result<MutexGuard<'_, WindowManager>> { lock_state(&self._window, "WindowManager") }
 }
