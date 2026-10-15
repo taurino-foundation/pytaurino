@@ -6,7 +6,47 @@ pub mod platforms;
 pub mod resources;
 pub mod dispatcher;
 pub mod events;
-use {tao::window::Theme as TaoTheme, taurino_config::Theme};
+use {
+    crate::events::{SynthesizedEvent, WebViewEvent},
+    tao::window::Theme as TaoTheme,
+    taurino_config::{
+        NativeEvent, NativeLoop, NativeLoopBuilder, NativeLoopClosed, NativeLoopProxy, NativeWindowTarget, Theme,
+        webview::WebViewId, window::WindowId,
+    },
+};
+
+pub enum EventLoopMessage {
+    FullScreenElementChanged(WindowId, bool),
+    SynthesizedEvent(WindowId, WebViewId, SynthesizedEvent),
+    WebviewEvent(WindowId, WebViewId, WebViewEvent),
+}
+
+pub type EngineLoop = NativeLoop<EventLoopMessage>;
+pub type EngineLoopBuilder = NativeLoopBuilder<EventLoopMessage>;
+pub type LoopProxy = NativeLoopProxy<EventLoopMessage>;
+pub type EngineWindowTarget = NativeWindowTarget<EventLoopMessage>;
+pub type EngineLoopClosed = NativeLoopClosed<EventLoopMessage>;
+pub type EngineEvent<'a> = NativeEvent<'a, EventLoopMessage>;
+
+pub struct EngineLoopProxy(LoopProxy);
+
+impl Clone for EngineLoopProxy {
+    fn clone(&self) -> Self { Self(self.0.clone()) }
+}
+
+impl EngineLoopProxy {
+    pub fn new(proxy: LoopProxy) -> Self { Self(proxy) }
+
+    pub fn send_event(&self, event: EventLoopMessage) -> anyhow::Result<()> {
+        self.0
+            .send_event(taurino_config::NativeMessage::UserEvents(event))
+            .map_err(|_| anyhow::anyhow!("Taurino event loop is closed"))
+    }
+
+    pub fn send_native_event(&self, event: taurino_config::NativeMessage<EventLoopMessage>) -> anyhow::Result<()> {
+        self.0.send_event(event).map_err(|_| anyhow::anyhow!("Taurino event loop is closed"))
+    }
+}
 
 pub fn map_from_tao_theme(theme: TaoTheme) -> Theme {
     match theme {

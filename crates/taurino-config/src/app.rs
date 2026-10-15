@@ -52,7 +52,7 @@ impl AppConfig {
     ///
     /// Expected input:
     /// Python Config.to_engine_bytes()
-    pub fn from_engine_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         const MAX_BOOTSTRAP_SIZE: usize = 8 * 1024 * 1024;
         ensure!(!bytes.is_empty(), "Engine configuration must not be empty");
         ensure!(bytes.len() <= MAX_BOOTSTRAP_SIZE, "Engine configuration exceeds maximum bootstrap size");

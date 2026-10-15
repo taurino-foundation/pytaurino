@@ -1,4 +1,7 @@
-use anyhow::{Result, anyhow};
+use {
+    anyhow::{Result, anyhow},
+    taurino_core::EngineWindowTarget,
+};
 pub mod factory;
 /// Registry and lifecycle owner for all windows known to the engine.
 ///
@@ -64,7 +67,7 @@ use {
     crate::{app::manager::RuntimeManager, unsafe_impl_sync_send, window::factory::create_window},
     tao::window::WindowId as TaoWindowId,
     taurino_config::{
-        ArcMut, EngineWindowTarget, arc_mut,
+        ArcMut, arc_mut,
         window::{WindowConfig, WindowId},
     },
     taurino_core::window::Window,

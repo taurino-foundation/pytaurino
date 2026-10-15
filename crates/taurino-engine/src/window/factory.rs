@@ -16,11 +16,12 @@ use {
         sync::Arc,
     },
     taurino_config::{
-        EngineWindowTarget, WebContext, arc_mut,
+        WebContext, arc_mut,
         webview::{BackgroundThrottlingPolicy, WebViewConfig, WebViewId},
         window::{WindowConfig, WindowId},
     },
     taurino_core::{
+        EngineWindowTarget,
         dispatcher::{all_initialization_scripts, install_ipc_bridge},
         platforms::{MonitorExt, util::calculate_window_center_position},
         webview::{WebViewManager, apply_build_webview, apply_webview_bounds},

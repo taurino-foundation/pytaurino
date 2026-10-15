@@ -4867,6 +4867,7 @@ dependencies = [
  "pyo3",
  "rmp-serde",
  "rmpv",
+ "serde",
  "serde_json",
  "tao",
  "taurino-aio",

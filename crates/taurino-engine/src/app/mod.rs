@@ -1,7 +1,10 @@
 pub mod handler;
 pub mod index;
 use {
-    std::thread::JoinHandle, tao::platform::run_return::EventLoopExtRunReturn, taurino_config::utils::DeviceRegistry,
+    std::thread::JoinHandle,
+    tao::platform::run_return::EventLoopExtRunReturn,
+    taurino_config::utils::DeviceRegistry,
+    taurino_core::{EngineLoop, EngineLoopBuilder, EngineLoopProxy},
 };
 pub mod manager;
 use {
@@ -16,7 +19,7 @@ use {
         atomic::{AtomicBool, Ordering},
     },
     taurino_aio::IpcClient,
-    taurino_config::{Config, EngineLoop, EngineLoopBuilder, EventLoopMessage, webview::WebContextStore},
+    taurino_config::{Config, webview::WebContextStore},
 };
 
 #[allow(dead_code)]
@@ -35,17 +38,17 @@ impl Runtime {
         let context_manager = WebContextStore::default();
         // Tao's event loop must be created and run on the GUI process main thread.
         let mut loop_builder = EngineLoopBuilder::with_user_event();
-        let mut event_loop = loop_builder.build();
-
+        let event_loop = loop_builder.build();
+        let proxy = EngineLoopProxy::new(event_loop.create_proxy());
         let ipc_proxy = event_loop.create_proxy();
 
         // IPC runs on its own Tokio thread and sends events through the proxy.
         let ipc_connection = IpcClient::new(&config.connection, move |event| {
-            let _ = ipc_proxy.send_event(EventLoopMessage::IPC(event));
+            let _ = ipc_proxy.send_event(taurino_config::NativeMessage::IPC(event));
         })?;
 
         let watcher_running = Arc::new(AtomicBool::new(true));
-        let watcher = spawn_shutdown_watcher(shutdown_event, event_loop.create_proxy(), Arc::clone(&watcher_running));
+        let watcher = spawn_shutdown_watcher(shutdown_event, proxy.clone(), Arc::clone(&watcher_running));
 
         // Notify Python only once the IPC client, window, and WebView exist.
         // This does NOT mean JavaScript has installed all application listeners.
@@ -55,8 +58,7 @@ impl Runtime {
             return Err(error.into());
         }
 
-        let manager =
-            RuntimeManager::new(config, context_manager, device_registry, ipc_connection.clone(), &mut event_loop)?;
+        let manager = RuntimeManager::new(config, context_manager, device_registry, ipc_connection.clone(), proxy)?;
         Ok(Self { ipc_connection, event_loop, manager, watcher_running, watcher })
     }
 

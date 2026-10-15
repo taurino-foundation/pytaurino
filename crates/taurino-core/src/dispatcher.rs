@@ -1,14 +1,12 @@
 use {
-    crate::webview::WebView,
+    crate::{EngineLoopProxy, EventLoopMessage, webview::WebView},
     anyhow::{Context, Result},
     rmpv::Value as RmpvValue,
     serde::Deserialize,
     serde_json::{Value as JsonValue, json},
     std::collections::HashMap,
-    tao::event_loop::EventLoopProxy,
-    taurino_aio::IpcClient,
     taurino_config::{
-        EngineLoopProxy, EventLoopMessage,
+        NativeMessage,
         protocol::{InvokeRequest, InvokeResponse},
     },
     wry::{InitializationScript, WebViewBuilder},
@@ -105,13 +103,13 @@ pub fn install_ipc_bridge(
             }
         };
 
-        let event = EventLoopMessage::JsInvoke {
+        let event = NativeMessage::JsInvoke {
             window_label: window_label.clone(),
             webview_label: webview_label.clone(),
             request: message,
         };
 
-        if let Err(error) = proxy.send_event(event) {
+        if let Err(error) = proxy.send_native_event(event) {
             eprintln!("Failed to forward JS invoke: {error}");
         }
     })

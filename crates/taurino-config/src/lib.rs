@@ -54,28 +54,28 @@ pub struct WebContext {
 
 pub type WebContextStore = Arc<Mutex<HashMap<Option<PathBuf>, WebContext>>>;
 
-pub type EngineLoop = EventLoop<EventLoopMessage>;
-pub type EngineLoopBuilder = EventLoopBuilder<EventLoopMessage>;
-pub type EngineLoopProxy = EventLoopProxy<EventLoopMessage>;
-pub type EngineWindowTarget = EventLoopWindowTarget<EventLoopMessage>;
-pub type EngineLoopClosed = EventLoopClosed<EventLoopMessage>;
-pub type EngineEvent<'a> = Event<'a, EventLoopMessage>;
+pub type NativeLoop<T> = EventLoop<NativeMessage<T>>;
+pub type NativeLoopBuilder<T> = EventLoopBuilder<NativeMessage<T>>;
+pub type NativeLoopProxy<T> = EventLoopProxy<NativeMessage<T>>;
+pub type NativeWindowTarget<T> = EventLoopWindowTarget<NativeMessage<T>>;
+pub type NativeLoopClosed<T> = EventLoopClosed<NativeMessage<T>>;
+pub type NativeEvent<'a, T> = Event<'a, NativeMessage<T>>;
 
-pub type EngineCallback = Pin<Box<dyn Fn(&EngineWindowTarget, &mut ControlFlow) -> Result<()> + Send>>;
-pub struct EngineTask(EngineCallback);
+pub type NativeCallback<T> = Pin<Box<dyn Fn(&NativeWindowTarget<T>, &mut ControlFlow) -> Result<()> + Send>>;
+pub struct NativeTask<T: 'static>(NativeCallback<T>);
 
-impl Debug for EngineTask {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.debug_struct("EngineTask").finish() }
+impl<T> Debug for NativeTask<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { f.debug_struct("NativeTask").finish() }
 }
 
-impl EngineTask {
-    pub fn new<F: Fn(&EngineWindowTarget, &mut ControlFlow) -> Result<()> + Send + 'static>(f: F) -> Self {
+impl<T> NativeTask<T> {
+    pub fn new<F: Fn(&NativeWindowTarget<T>, &mut ControlFlow) -> Result<()> + Send + 'static>(f: F) -> Self {
         Self(Box::pin(f))
     }
 }
 
-impl Deref for EngineTask {
-    type Target = Pin<Box<dyn Fn(&EngineWindowTarget, &mut ControlFlow) -> Result<()> + Send>>;
+impl<T> Deref for NativeTask<T> {
+    type Target = Pin<Box<dyn Fn(&NativeWindowTarget<T>, &mut ControlFlow) -> Result<()> + Send>>;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
@@ -96,7 +96,7 @@ pub enum IpcEvent {
 ///
 /// Code executing outside the GUI event loop should generally send one of these
 /// messages instead of manipulating Tao state directly.
-pub enum EventLoopMessage {
+pub enum NativeMessage<T: 'static> {
     /// Requests graceful termination of the entire application.
     ///
     /// The request is processed by [`MainThreadEventHandler`] on the event-loop
@@ -108,7 +108,7 @@ pub enum EventLoopMessage {
     /// This variant allows Taurino subsystems to schedule arbitrary operations
     /// that require access to the Tao event-loop target and its
     /// [`ControlFlow`].
-    EngineTask(EngineTask),
+    NativeTask(NativeTask<T>),
     /// Executes a dynamically supplied event-loop operation.
     ///
     /// This variant allows Taurino subsystems to schedule arbitrary operations
@@ -129,6 +129,7 @@ pub enum EventLoopMessage {
         response: std::result::Result<InvokeResponse, String>,
     },
     IPC(IpcEvent),
+    UserEvents(T),
 }
 
 // Create a filesystem-safe application name.
@@ -461,7 +462,7 @@ pub struct Config {
 impl Config {
     /// Decode MessagePack and initialize application paths.
     pub fn new(config: Vec<u8>) -> Result<Self> {
-        let app = AppConfig::from_engine_bytes(&config)?;
+        let app = AppConfig::from_bytes(&config)?;
         Self::from_app_config(app)
     }
     /// Create a resolved runtime configuration.

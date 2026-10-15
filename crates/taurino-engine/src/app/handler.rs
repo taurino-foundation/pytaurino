@@ -14,21 +14,20 @@ use {
         event_loop::ControlFlow,
         window::WindowId as TaoWindowId,
     },
-    taurino_aio::IpcClient,
     taurino_config::{
-        EngineEvent, EngineWindowTarget, EventLoopMessage, IpcEvent, log_if_err,
+        IpcEvent, NativeMessage, log_if_err,
         protocol::{InvokeRequest, InvokeResponse, NotificationTarget},
+        webview::WebViewId,
+        window::WindowId,
     },
     taurino_core::{
+        EngineEvent, EngineWindowTarget, EventLoopMessage,
         dispatcher::{PendingInvoke, RpcResponse, allocate_request_id, dispatch, reply_to_js, try_handle_notification},
-        events::WindowEventWrapper,
-        webview::WebView,
+        events::{SynthesizedEvent, WebViewEvent, WindowEvent, WindowEventWrapper},
     },
 };
 
-const MAIN_WEBVIEW_LABEL: &str = "root";
 const COMMAND_METHOD: &str = "commands.invoke";
-
 /// Central event dispatcher and lifecycle coordinator for the engine.
 ///
 /// Native Tao window events, synthesized window events and WebView events are
@@ -65,67 +64,54 @@ impl EventHandler {
     pub fn handle_event<'a>(
         &mut self,
         event: EngineEvent<'a>,
-        target: &EngineWindowTarget,
-        control_flow: &mut ControlFlow,
+        _target: &EngineWindowTarget,
+        _control_flow: &mut ControlFlow,
     ) {
         if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
-
-        /*
-         * `event` is consumed by the match below, so inspect LoopDestroyed
-         * beforehand.
-         */
         let loop_destroyed = matches!(&event, Event::LoopDestroyed);
 
         let result = (|| -> Result<()> {
-            if !matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
-                *control_flow = ControlFlow::Wait;
+            if !matches!(*_control_flow, ControlFlow::ExitWithCode(_)) {
+                *_control_flow = ControlFlow::Wait;
             }
 
             match event {
                 /*
-                                 * Synthesized window events.
-                                 *
-                                 * These originate from Wry/WebView behavior but semantically
-                                 * represent window events.
-                                 *
-                                 * This arm must come before the generic UserEvent arm.
-                                 */
-                /*                 Event::UserEvent(EventLoopMessage::SynthesizedWindowEvent(
-                                    window_id,
-                                    _webview_id,
-                                    event,
-                                )) => {
-                                    self.handle_synthesized_window_event(window_id, event)?;
-                                } */
-
-                                /*
-                                 * WebView-specific events.
-                                 *
-                                 * These remain WebView events and are not converted into
-                                 * WindowEvent.
-                                 */
-                /*                 Event::UserEvent(EventLoopMessage::WebviewEvent(
-                                    window_id,
-                                    webview_id,
-                                    event,
-                                )) => {
-                                    self.handle_webview_event(window_id, webview_id, event)?;
-                                } */
-
-                                /*
-                                 * Native Tao window events.
-                                 */
+                 * Synthesized window events.
+                 *
+                 * These originate from Wry/WebView behavior but semantically
+                 * represent window events.
+                 *
+                 * This arm must come before the generic UserEvent arm.
+                 */
+                Event::UserEvent(NativeMessage::UserEvents(EventLoopMessage::SynthesizedEvent(
+                    window_id,
+                    _webview_id,
+                    event,
+                ))) => {
+                    self.handle_synthesized_event(window_id, event)?;
+                }
+                /*
+                 * WebView-specific events.
+                 *
+                 * These remain WebView events and are not converted into
+                 * WindowEvent.
+                 */
+                Event::UserEvent(NativeMessage::UserEvents(EventLoopMessage::WebviewEvent(
+                    window_id,
+                    webview_id,
+                    event,
+                ))) => {
+                    self.handle_webview_event(window_id, webview_id, event)?;
+                }
                 Event::WindowEvent { event, window_id, .. } => {
-                    self.handle_window_event(event, window_id, control_flow)?;
+                    self.handle_window_event(event, window_id, _control_flow)?;
                 }
 
-                /*
-                 * Remaining engine messages.
-                 */
                 Event::UserEvent(message) => {
-                    self.handle_user_message(message, target, control_flow)?;
+                    self.handle_native_event(message, _target, _control_flow)?;
                 }
 
                 _ => {}
@@ -136,125 +122,124 @@ impl EventHandler {
 
         log_if_err!(result);
 
-        /*
-         * Global cleanup must run at most once.
-         */
-        if (loop_destroyed || matches!(*control_flow, ControlFlow::ExitWithCode(_)))
+        if (loop_destroyed || matches!(*_control_flow, ControlFlow::ExitWithCode(_)))
             && !self.shutting_down.swap(true, Ordering::AcqRel)
         {
             log_if_err!(self.cleanup_app_resources());
         }
     }
-
-    // /// Handles window events synthesized by WebView/Wry.
-    // ///
-    // /// This intentionally mirrors Tauri:
-    // ///
-    // /// `SynthesizedWindowEvent`
-    // ///     -> `WindowEventWrapper::from(...)`
-    // ///     -> public `WindowEvent`
-    // ///     -> global window event handler
-    /*     fn handle_synthesized_window_event(
-        &self,
-        window_id: WindowId,
-        event: SynthesizedWindowEvent,
-    ) -> Result<()> {
-        let Some(event) = WindowEventWrapper::from(event).0 else {
-            return Ok(());
-        };
-
-        /*
-         * Resolve only the information required by the callback while the
-         * WindowManager lock is held.
-         */
-        let window_label = {
-            let window_manager = self.manager.window_manager()?;
-
-            let window = window_manager.get_by_id(window_id).ok_or_else(|| {
-                anyhow!("window with id {window_id:?} not found for synthesized window event")
-            })?;
-
-            window.label.clone()
-        };
-
-        /*
-         * The manager lock is released before invoking external callbacks.
-         */
-        self.manager.emit_global_window_event(window_label, event)?;
-
-        Ok(())
-    } */
-
-    // /// Handles WebView-specific events.
-    // ///
-    // /// Unlike synthesized window events, WebView events are not converted
-    // /// through `WindowEventWrapper`. They remain `WebViewEvent` values.
-    /*     fn handle_webview_event(
-        &self,
-        window_id: WindowId,
-        webview_id: WebViewId,
-        event: WebViewEvent,
-    ) -> Result<()> {
+    /// Handles WebView-specific events.
+    ///
+    /// Unlike synthesized window events, WebView events are not converted
+    /// through `WindowEventWrapper`. They remain `WebViewEvent` values.
+    fn handle_webview_event(&self, window_id: WindowId, webview_id: WebViewId, event: WebViewEvent) -> Result<()> {
         /*
          * Resolve labels while holding the WindowManager lock only briefly.
          */
         let (window_label, webview_label) = {
             let window_manager = self.manager.window_manager()?;
 
-            let window = window_manager.get_by_id(window_id).ok_or_else(|| {
-                anyhow!("window with id {window_id:?} not found for WebView event")
-            })?;
+            let window = window_manager
+                .get_by_id(window_id)
+                .ok_or_else(|| anyhow!("window with id {window_id:?} not found for WebView event"))?;
 
-            let webview = window.webview(webview_id).ok_or_else(|| {
-                anyhow!("WebView with id {webview_id:?} not found in window {window_id:?}")
-            })?;
+            let webview = window
+                .webview(webview_id)
+                .ok_or_else(|| anyhow!("WebView with id {webview_id:?} not found in window {window_id:?}"))?;
 
             (window.label.clone(), webview.label().to_owned())
         };
 
-        /*
-         * Emit after releasing the WindowManager lock.
-         */
-        self.manager.emit_global_webview_event(window_label, webview_label, event)?;
+        self.manager.emit_webview_event(&window_label, &webview_label, event)?;
 
         Ok(())
-    } */
+    }
+    fn handle_synthesized_event(&mut self, window_id: WindowId, event: SynthesizedEvent) -> Result<()> {
+        let Some(event) = WindowEventWrapper::from(event).0 else {
+            return Ok(());
+        };
 
-    /// Handles engine user messages which are not Window/WebView events.
-    fn handle_user_message(
+        let window_label = {
+            let manager = self.manager.window_manager()?;
+
+            manager.get_by_id(window_id).ok_or_else(|| anyhow!("Window not found"))?.label.clone()
+        };
+
+        self.manager.emit_window_event(&window_label, &event)?;
+
+        Ok(())
+    }
+    fn handle_native_event(
         &mut self,
-        message: EventLoopMessage,
-        target: &EngineWindowTarget,
-        control_flow: &mut ControlFlow,
+        message: NativeMessage<EventLoopMessage>,
+        _target: &EngineWindowTarget,
+        _control_flow: &mut ControlFlow,
     ) -> Result<()> {
         match message {
-            EventLoopMessage::Shutdown => {
+            NativeMessage::Shutdown => {
                 println!("Keyboard interrupt detected. Exiting...");
-                self.shutdown(control_flow)?;
+                self.shutdown(_control_flow)?;
             }
 
-            EventLoopMessage::EngineTask(task) => {
-                task(target, control_flow)?;
+            NativeMessage::NativeTask(task) => {
+                task(_target, _control_flow)?;
             }
 
-            EventLoopMessage::Task(task) => {
+            NativeMessage::Task(task) => {
                 task();
             }
 
             #[cfg(target_os = "macos")]
-            EventLoopMessage::SetDockVisibility(visible) => target.set_dock_visibility(visible),
+            NativeMessage::SetDockVisibility(visible) => _target.set_dock_visibility(visible),
 
-            EventLoopMessage::JsInvoke { window_label, webview_label, request } => {
+            NativeMessage::JsInvoke { window_label, webview_label, request } => {
                 self.handle_js_invoke(window_label, webview_label, request)?;
             }
 
-            EventLoopMessage::JsReply { window_label, webview_label, request, response } => {
+            NativeMessage::JsReply { window_label, webview_label, request, response } => {
                 self.reply_invoke(&window_label, &webview_label, &request, response)?;
             }
-            EventLoopMessage::IPC(ipc_event) => {
+            NativeMessage::IPC(ipc_event) => {
                 self.handle_ipc_event(ipc_event)?;
             }
-            EventLoopMessage::EvalScript(_, _, _) => todo!(),
+            NativeMessage::UserEvents(message) => self.handle_user_message(message, _target, _control_flow)?,
+            NativeMessage::EvalScript(_, _, _) => unimplemented!(),
+        }
+        Ok(())
+    }
+    fn handle_user_message(
+        &mut self,
+        message: EventLoopMessage,
+        _target: &EngineWindowTarget,
+        _control_flow: &mut ControlFlow,
+    ) -> Result<()> {
+        match message {
+            EventLoopMessage::FullScreenElementChanged(window_id, fullscreen) => {
+                let window = {
+                    let manager = self.manager.window_manager()?;
+
+                    manager
+                        .get_by_id(window_id)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("Window with id {window_id:?} not found"))?
+                };
+
+                window.set_fullscreen(fullscreen)?;
+
+                self.manager.emit_window_event(
+                    &window.label,
+                    serde_json::json!({
+                        "type": "fullscreen-changed",
+                        "fullscreen": fullscreen,
+                    }),
+                )?;
+            }
+            EventLoopMessage::SynthesizedEvent(..) => {
+                unreachable!("SynthesizedWindowEvent must be handled before handle_user_message");
+            }
+            EventLoopMessage::WebviewEvent(..) => {
+                unreachable!("WebviewEvent must be handled before handle_user_message");
+            }
         }
 
         Ok(())
@@ -268,21 +253,21 @@ impl EventHandler {
         &self,
         event: TaoWindowEvent<'_>,
         window_id: TaoWindowId,
-        control_flow: &mut ControlFlow,
+        _control_flow: &mut ControlFlow,
     ) -> Result<()> {
         /*
          * Destruction is lifecycle handling rather than ordinary event
          * forwarding.
          */
         if matches!(event, TaoWindowEvent::Destroyed) {
-            return self.handle_window_destroyed(window_id, control_flow);
+            return self.handle_window_destroyed(window_id, _control_flow);
         }
 
         /*
          * CloseRequested also has dedicated lifecycle semantics.
          */
         if matches!(event, TaoWindowEvent::CloseRequested { .. }) {
-            return self.handle_close_requested(window_id, control_flow);
+            return self.handle_close_requested(window_id, _control_flow);
         }
 
         let (window_label, mapped_event) = {
@@ -300,13 +285,13 @@ impl EventHandler {
             (window.label.clone(), mapped_event)
         };
 
-        /* self.manager.emit_global_window_event(window_label, mapped_event)?; */
+        self.manager.emit_window_event(&window_label, mapped_event)?;
 
         Ok(())
     }
 
     /// Handles a native close request.
-    fn handle_close_requested(&self, window_id: TaoWindowId, control_flow: &mut ControlFlow) -> Result<()> {
+    fn handle_close_requested(&self, window_id: TaoWindowId, _control_flow: &mut ControlFlow) -> Result<()> {
         let window_label = {
             let window_manager = self.manager.window_manager()?;
 
@@ -317,14 +302,13 @@ impl EventHandler {
             window.label.clone()
         };
 
-        /* self.manager
-        .emit_global_window_event(window_label.clone(), WindowEvent::CloseRequested)?; */
+        self.manager.emit_window_event(&window_label, WindowEvent::CloseRequested)?;
 
-        self.close_window(window_id, &window_label, control_flow)
+        self.close_window(window_id, &window_label, _control_flow)
     }
 
     /// Handles Tao's final native destruction notification.
-    fn handle_window_destroyed(&self, window_id: TaoWindowId, control_flow: &mut ControlFlow) -> Result<()> {
+    fn handle_window_destroyed(&self, window_id: TaoWindowId, _control_flow: &mut ControlFlow) -> Result<()> {
         /*
          * The window may already have been removed when CloseRequested was
          * handled. In that case Tao is only confirming destruction.
@@ -340,15 +324,15 @@ impl EventHandler {
 
         let window_label = window.label.clone();
 
-        /* self.manager.emit_global_window_event(window_label.clone(), WindowEvent::Destroyed)?; */
+        self.manager.emit_window_event(&window_label, WindowEvent::Destroyed)?;
 
-        self.cleanup_window_resources(&window_label, control_flow)?;
+        self.cleanup_window_resources(&window_label, _control_flow)?;
 
         Ok(())
     }
 
     /// Removes a window and releases its associated resources.
-    fn close_window(&self, window_id: TaoWindowId, window_label: &str, control_flow: &mut ControlFlow) -> Result<()> {
+    fn close_window(&self, window_id: TaoWindowId, window_label: &str, _control_flow: &mut ControlFlow) -> Result<()> {
         let removed_window = {
             let mut window_manager = self.manager.window_manager()?;
             window_manager.remove_by_tao_id(window_id)
@@ -359,7 +343,7 @@ impl EventHandler {
          * after the WindowManager guard has been released.
          */
         if removed_window.is_some() {
-            self.cleanup_window_resources(window_label, control_flow)?;
+            self.cleanup_window_resources(window_label, _control_flow)?;
         }
 
         let no_windows_left = {
@@ -368,14 +352,14 @@ impl EventHandler {
         };
 
         if no_windows_left {
-            *control_flow = ControlFlow::Exit;
+            *_control_flow = ControlFlow::Exit;
         }
 
         Ok(())
     }
 
     /// Releases resources owned by one window.
-    fn cleanup_window_resources(&self, _window_label: &str, control_flow: &mut ControlFlow) -> Result<()> {
+    fn cleanup_window_resources(&self, _window_label: &str, _control_flow: &mut ControlFlow) -> Result<()> {
         /*
          * Window-specific manager cleanup belongs here.
          *
@@ -391,7 +375,7 @@ impl EventHandler {
          */
 
         if self.manager.window_manager()?.is_empty() {
-            *control_flow = ControlFlow::Exit;
+            *_control_flow = ControlFlow::Exit;
         }
 
         Ok(())
@@ -401,7 +385,7 @@ impl EventHandler {
     fn cleanup_app_resources(&self) -> Result<()> { Ok(()) }
 
     /// Performs an explicit application shutdown.
-    fn shutdown(&self, control_flow: &mut ControlFlow) -> Result<()> {
+    fn shutdown(&self, _control_flow: &mut ControlFlow) -> Result<()> {
         /*
          * Shutdown is idempotent.
          */
@@ -427,16 +411,14 @@ impl EventHandler {
          * The WindowManager lock is released before cleanup and callbacks.
          */
         for window_label in window_labels {
-            log_if_err!(self.cleanup_window_resources(&window_label, control_flow));
+            log_if_err!(self.cleanup_window_resources(&window_label, _control_flow));
 
-            /*             log_if_err!(
-                self.manager.emit_global_window_event(window_label, WindowEvent::Destroyed,)
-            ); */
+            log_if_err!(self.manager.emit_window_event(&window_label, WindowEvent::Destroyed));
         }
 
         self.cleanup_app_resources()?;
 
-        *control_flow = ControlFlow::Exit;
+        *_control_flow = ControlFlow::Exit;
 
         Ok(())
     }
@@ -528,7 +510,7 @@ impl EventHandler {
         Ok(())
     }
 
-    fn handle_rpc_response(&mut self, payload: &[u8]) -> Result<()> {
+    /*     fn handle_rpc_response(&mut self, payload: &[u8]) -> Result<()> {
         // Python -> Rust:
         // [request_id, status, message, data]
         let (request_id, status, message, data): RpcResponse = rmp_serde::from_slice(payload)?;
@@ -545,7 +527,7 @@ impl EventHandler {
         };
 
         self.reply_invoke(&pending.window_label, &pending.webview_label, &pending.request, response)
-    }
+    } */
 
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<()> {
         match event {

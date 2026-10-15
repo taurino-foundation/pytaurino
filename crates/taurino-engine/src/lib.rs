@@ -7,10 +7,7 @@ use std::{
 };
 pub mod app;
 pub mod window;
-use {
-    pyo3::prelude::*,
-    taurino_config::{EngineLoopProxy, EventLoopMessage},
-};
+use {pyo3::prelude::*, taurino_config::NativeMessage, taurino_core::EngineLoopProxy};
 
 #[macro_export]
 macro_rules! unsafe_impl_sync_send {
@@ -34,13 +31,13 @@ fn spawn_shutdown_watcher(
 
             match wait_result {
                 Ok(true) => {
-                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
+                    let _ = proxy.send_native_event(NativeMessage::Shutdown);
                     break;
                 }
                 Ok(false) => {}
                 Err(error) => {
                     eprintln!("Shutdown watcher failed: {error}");
-                    let _ = proxy.send_event(EventLoopMessage::Shutdown);
+                    let _ = proxy.send_native_event(NativeMessage::Shutdown);
                     break;
                 }
             }

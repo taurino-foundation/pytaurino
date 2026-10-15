@@ -2,9 +2,11 @@ pub mod monitor;
 pub mod window;
 
 #[cfg(windows)]
+use crate::{EngineLoopProxy, EventLoopMessage, events::SynthesizedEvent};
+#[cfg(windows)]
 use dpi::PhysicalSize;
 #[cfg(windows)]
-use taurino_config::{ArcMut, EngineLoopProxy, FocusState, webview::WebViewId, window::WindowId};
+use taurino_config::{ArcMut, FocusState, webview::WebViewId, window::WindowId};
 #[cfg(windows)]
 use webview2_com::{
     ContainsFullScreenElementChangedEventHandler, FocusChangedEventHandler,
@@ -50,8 +52,9 @@ fn add_focus_change_listeners(
     token: &mut i64,
 ) {
     let label_ = _webview_label.clone();
-    let window_id_ = window_id;
-    let proxy_clone = proxy;
+    let window_id_ = window_id.clone();
+    let lost_focus_proxy = proxy.clone();
+    let got_focus_proxy = proxy.clone();
     let focused_webview_ = focused_webview.clone();
     if let Err(error) = unsafe {
         controller.add_GotFocus(
@@ -64,12 +67,11 @@ fn add_focus_change_listeners(
                 *focused_webview = FocusState::WebviewFocused { webview_label: label_.clone() };
 
                 if !already_focused {
-                    /*
-                    let _ = proxy_clone.send_event(EventLoopMessage::SynthesizedWindowEvent(
+                    let _ = got_focus_proxy.send_event(EventLoopMessage::SynthesizedEvent(
                         *window_id_.lock().unwrap(),
                         webview_id,
-                        SynthesizedWindowEvent::Focused(true),
-                    )); */
+                        SynthesizedEvent::Focused(true),
+                    ));
                 }
                 Ok(())
             })),
@@ -99,12 +101,12 @@ fn add_focus_change_listeners(
                     if lost_window_focus {
                         // only reset when we lost window focus - otherwise some other webview is focused
                         *focused_webview = FocusState::Blured { last_focused_webview_label: Some(label) };
-                        /*
-                        let _ = proxy.send_event(crate::EventLoopMessage::SynthesizedWindowEvent(
+
+                        let _ = lost_focus_proxy.send_event(EventLoopMessage::SynthesizedEvent(
                             *window_id.lock().unwrap(),
                             webview_id,
-                            SynthesizedWindowEvent::Focused(false),
-                        )); */
+                            SynthesizedEvent::Focused(false),
+                        ));
                     }
                 }
 
@@ -128,13 +130,14 @@ pub fn register_webview_events(
     _webview: &wry::WebView,
     _proxy: EngineLoopProxy,
 ) {
+    let id = _window_id.clone();
     let controller = _webview.controller();
     let mut token = 0;
 
     add_focus_change_listeners(
-        _window_id,
+        id.clone(),
         _webview_id,
-        _proxy,
+        _proxy.clone(),
         _focused_webview,
         _webview_label,
         &controller,
@@ -149,13 +152,10 @@ pub fn register_webview_events(
                     sender
                         .ok_or_else(windows::core::Error::empty)?
                         .ContainsFullScreenElement(&mut contains_fullscreen_element)?;
-                    /*
-                        let _ = _proxy.send_event(
-                        crate::EventLoopMessage::ContainsFullScreenElementChanged(
-                            *_window_id.lock().unwrap(),
-                            contains_fullscreen_element.as_bool(),
-                        ),
-                    ); */
+                    let _ = _proxy.send_event(EventLoopMessage::FullScreenElementChanged(
+                        *id.lock().unwrap(),
+                        contains_fullscreen_element.as_bool(),
+                    ));
                     Ok(())
                 })),
                 &mut token,

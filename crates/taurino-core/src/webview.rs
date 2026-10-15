@@ -5,7 +5,7 @@ use tao::platform::windows::WindowExtWindows;
 #[cfg(windows)]
 use taurino_config::{ArcMut, FocusState};
 use {
-    crate::wrappers::RectWrapper,
+    crate::{EngineLoopProxy, wrappers::RectWrapper},
     anyhow::{Result, anyhow},
     dpi::LogicalPosition,
     std::{
@@ -20,7 +20,7 @@ use {
     },
     tao::window::Window,
     taurino_config::{
-        EngineLoopProxy, Rect, WebContextStore,
+        Rect, WebContextStore,
         webview::{WebViewId, WebviewBounds},
         window::WindowId,
     },
